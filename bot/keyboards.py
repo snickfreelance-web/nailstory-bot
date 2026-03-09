@@ -1,0 +1,572 @@
+# ===================================================
+# keyboards.py — Все клавиатуры бота
+# ===================================================
+# Централизованное место для всех кнопок и клавиатур.
+# Разделяем на две категории:
+#   1. InlineKeyboardMarkup — кнопки внутри сообщения
+#   2. ReplyKeyboardMarkup — кнопки под полем ввода
+#
+# Inline используем везде где нужен выбор из вариантов.
+# Reply используем только для запроса контакта (телефона).
+# ===================================================
+
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from typing import List, Dict, Optional
+
+
+# ===================================================
+# КЛАВИАТУРЫ ПРИВЕТСТВИЯ И ГЛАВНОГО МЕНЮ
+# ===================================================
+
+def get_start_keyboard() -> InlineKeyboardMarkup:
+    """
+    Клавиатура стартового сообщения.
+    Показывается сразу после /start.
+
+    Кнопки:
+        💅 Записаться на маникюр — начинает процесс записи
+        📞 Связаться с нами    — показывает контакты
+    """
+    builder = InlineKeyboardBuilder()
+
+    builder.button(
+        text="💅 Записаться на маникюр",
+        callback_data="start_booking"
+    )
+    builder.button(
+        text="📞 Связаться с нами",
+        callback_data="show_contacts"
+    )
+
+    # Кнопки по одной в ряд (столбец)
+    builder.adjust(1)
+
+    return builder.as_markup()
+
+
+# ===================================================
+# КЛАВИАТУРЫ ВЫБОРА УСЛУГИ
+# ===================================================
+
+def get_services_keyboard(services: List[Dict]) -> InlineKeyboardMarkup:
+    """
+    Динамически строит клавиатуру со списком услуг из БД.
+    Количество кнопок = количество активных услуг.
+
+    Args:
+        services: Список словарей из database.get_all_services()
+                  Каждый содержит: id, name, price, duration_min
+
+    Returns:
+        InlineKeyboardMarkup с кнопками для каждой услуги
+
+    Пример отображения:
+        [💅 Маникюр классический — 1000 ₽]
+        [✨ Гель-покрытие — 1500 ₽]
+        [🌸 Маникюр + гель — 2000 ₽]
+        [◀ Назад]
+    """
+    builder = InlineKeyboardBuilder()
+
+    for service in services:
+        # Форматируем текст кнопки: "Название — ЦЕНА ₽"
+        btn_text = f"💅 {service['name']} — {service['price']} ₽"
+
+        # callback_data содержит ID услуги для однозначной идентификации
+        builder.button(
+            text=btn_text,
+            callback_data=f"service:{service['id']}"
+        )
+
+    # Кнопка "Назад" для возврата в главное меню
+    builder.button(
+        text="◀ Назад",
+        callback_data="back_to_main"
+    )
+
+    # По одной кнопке в ряд — удобнее читать длинные названия
+    builder.adjust(1)
+
+    return builder.as_markup()
+
+
+# ===================================================
+# КЛАВИАТУРА ЗАПРОСА ТЕЛЕФОНА
+# ===================================================
+
+def get_phone_keyboard() -> ReplyKeyboardMarkup:
+    """
+    Reply-клавиатура для запроса номера телефона.
+
+    Используем ReplyKeyboard (а не Inline) потому что
+    только Reply-кнопки поддерживают request_contact=True.
+    Эта специальная кнопка отправляет верифицированный
+    номер из Telegram-профиля без ручного ввода.
+
+    Returns:
+        ReplyKeyboardMarkup с кнопкой "Отправить телефон"
+        и кнопкой "Ввести вручную" (для пользователей без телефона в TG)
+
+    После получения телефона клавиатуру нужно убрать
+    с помощью ReplyKeyboardRemove().
+    """
+    builder = ReplyKeyboardBuilder()
+
+    # Главная кнопка — запрашивает контакт из профиля Telegram
+    builder.button(
+        text="📱 Отправить мой номер",
+        request_contact=True,  # Ключевой параметр!
+    )
+
+    # Кнопка для ручного ввода (на случай если контакт скрыт)
+    builder.button(
+        text="✏️ Ввести номер вручную",
+    )
+
+    # Кнопки по одной в ряд
+    builder.adjust(1)
+
+    return builder.as_markup(
+        resize_keyboard=True,  # Уменьшаем клавиатуру под контент
+        one_time_keyboard=True,  # Скрывается после нажатия
+    )
+
+
+def get_remove_keyboard() -> ReplyKeyboardRemove:
+    """
+    Убирает Reply-клавиатуру после использования.
+    Отправляется вместе с сообщением подтверждения.
+    """
+    return ReplyKeyboardRemove()
+
+
+# ===================================================
+# КЛАВИАТУРЫ ПОДТВЕРЖДЕНИЯ
+# ===================================================
+
+def get_confirm_keyboard() -> InlineKeyboardMarkup:
+    """
+    Клавиатура финального подтверждения записи.
+    Показывается перед созданием бронирования.
+
+    Кнопки:
+        ✅ Подтвердить  — создаёт бронирование в БД
+        ✏️ Изменить    — возвращает к выбору услуги
+        ❌ Отменить    — отменяет и возвращает в начало
+    """
+    builder = InlineKeyboardBuilder()
+
+    builder.button(text="✅ Подтвердить запись", callback_data="confirm_booking")
+    builder.button(text="✏️ Изменить", callback_data="back_to_service")
+    builder.button(text="❌ Отменить", callback_data="cancel_booking")
+
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+# ===================================================
+# КЛАВИАТУРЫ АДМИНИСТРАТИВНОЙ ПАНЕЛИ
+# ===================================================
+
+def get_admin_main_keyboard() -> InlineKeyboardMarkup:
+    """
+    Главное меню администратора.
+    Доступно по команде /admin.
+
+    Кнопки:
+        📋 Все бронирования  — список записей с фильтрами
+        💅 Управление услугами — добавить/удалить/скрыть
+        📅 Расписание        — управление слотами
+        📊 Статистика        — сводка по записям
+    """
+    builder = InlineKeyboardBuilder()
+
+    builder.button(text="📋 Бронирования", callback_data="admin:bookings")
+    builder.button(text="💅 Услуги", callback_data="admin:services")
+    builder.button(text="📅 Расписание", callback_data="admin:schedule")
+    builder.button(text="📊 Статистика", callback_data="admin:stats")
+
+    # Две кнопки в ряд
+    builder.adjust(2)
+
+    return builder.as_markup()
+
+
+def get_admin_services_keyboard(services: List[Dict]) -> InlineKeyboardMarkup:
+    """
+    Список услуг в панели администратора.
+    Отличается от клиентского: показывает ВСЕ услуги (включая скрытые)
+    и добавляет кнопки управления для каждой.
+
+    Args:
+        services: Список ВСЕХ услуг (active_only=False)
+
+    Returns:
+        Клавиатура с услугами и кнопками управления
+
+    Пример:
+        [💅 Маникюр — 1000₽ | ✅ Вкл]
+        [✨ Гель — 1500₽     | 🔴 Выкл]
+        [+ Добавить услугу]
+        [◀ Назад]
+    """
+    builder = InlineKeyboardBuilder()
+
+    for service in services:
+        # Статус услуги визуально
+        status_icon = "✅" if service["is_active"] else "🔴"
+
+        # Название услуги — нажатие открывает детали
+        builder.button(
+            text=f"{status_icon} {service['name']} — {service['price']} ₽",
+            callback_data=f"admin_svc:{service['id']}"
+        )
+
+    # Кнопка добавления новой услуги
+    builder.button(text="➕ Добавить услугу", callback_data="admin_svc:add")
+
+    # Кнопка возврата в главное меню
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
+
+    # Каждая услуга — своя строка, добавить и назад — отдельные строки
+    builder.adjust(1)
+
+    return builder.as_markup()
+
+
+def get_admin_service_detail_keyboard(service_id: str, is_active: bool) -> InlineKeyboardMarkup:
+    """
+    Детальная страница конкретной услуги в админке.
+    Показывает кнопки управления выбранной услугой.
+
+    Args:
+        service_id: UUID услуги
+        is_active: Текущий статус (для кнопки переключения)
+
+    Returns:
+        Клавиатура с действиями над услугой
+
+    Кнопки:
+        🔴 Скрыть / ✅ Показать  — переключить видимость
+        🗑 Удалить              — полное удаление (если нет бронирований)
+        ◀ Назад                — к списку услуг
+    """
+    builder = InlineKeyboardBuilder()
+
+    # Текст кнопки зависит от текущего статуса
+    if is_active:
+        toggle_text = "🔴 Скрыть от клиентов"
+        toggle_data = f"admin_svc_hide:{service_id}"
+    else:
+        toggle_text = "✅ Показать клиентам"
+        toggle_data = f"admin_svc_show:{service_id}"
+
+    builder.button(text=toggle_text, callback_data=toggle_data)
+    builder.button(text="🗑 Удалить услугу", callback_data=f"admin_svc_del:{service_id}")
+    builder.button(text="◀ К списку услуг", callback_data="admin:services")
+
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_admin_duration_keyboard() -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора длительности услуги.
+    Администратор выбирает из готовых вариантов вместо ввода числа.
+
+    Returns:
+        Клавиатура с вариантами длительности в минутах
+
+    Преимущество: администратор не может ввести некорректное значение.
+    """
+    builder = InlineKeyboardBuilder()
+
+    # Стандартные длительности для маникюрных услуг
+    durations = [30, 45, 60, 75, 90, 120]
+
+    for dur in durations:
+        if dur >= 60:
+            hours = dur // 60
+            mins = dur % 60
+            if mins == 0:
+                label = f"⏱ {hours} ч"
+            else:
+                label = f"⏱ {hours} ч {mins} мин"
+        else:
+            label = f"⏱ {dur} мин"
+
+        builder.button(text=label, callback_data=f"duration:{dur}")
+
+    builder.button(text="❌ Отмена", callback_data="admin:services")
+
+    # По 2 кнопки в ряд, кнопка отмены отдельно
+    builder.adjust(2, 2, 2, 1)
+    return builder.as_markup()
+
+
+def get_admin_bookings_filter_keyboard() -> InlineKeyboardMarkup:
+    """
+    Клавиатура фильтрации бронирований по статусу.
+    Позволяет быстро просмотреть нужную категорию записей.
+
+    Кнопки:
+        📋 Все       — все бронирования
+        ⏳ Ожидающие — статус pending
+        ✅ Подтверждённые — статус confirmed
+        ❌ Отменённые  — статус cancelled
+        📅 По дате   — ввод конкретной даты
+        ◀ Меню       — в главное меню
+    """
+    builder = InlineKeyboardBuilder()
+
+    builder.button(text="📋 Все", callback_data="admin_bk_filter:all")
+    builder.button(text="⏳ Ожидающие", callback_data="admin_bk_filter:pending")
+    builder.button(text="✅ Подтверждённые", callback_data="admin_bk_filter:confirmed")
+    builder.button(text="❌ Отменённые", callback_data="admin_bk_filter:cancelled")
+    builder.button(text="📅 По дате", callback_data="admin_bk_filter:date")
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
+
+    builder.adjust(2, 2, 1, 1)
+    return builder.as_markup()
+
+
+def get_admin_booking_actions_keyboard(
+    booking_id: str,
+    current_status: str,
+    page: int = 0
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура действий с конкретным бронированием.
+
+    Args:
+        booking_id: UUID бронирования
+        current_status: Текущий статус для показа доступных действий
+        page: Текущая страница списка (для возврата назад)
+
+    Returns:
+        Клавиатура с действиями
+
+    Доступные действия зависят от статуса:
+        pending:   [Подтвердить] [Перенести] [Отменить] [Удалить]
+        confirmed: [Перенести] [Отменить] [Удалить]
+        cancelled: [Удалить] [Восстановить]
+    """
+    builder = InlineKeyboardBuilder()
+
+    if current_status == "pending":
+        builder.button(
+            text="✅ Подтвердить",
+            callback_data=f"admin_bk_confirm:{booking_id}"
+        )
+
+    if current_status != "cancelled":
+        builder.button(
+            text="📅 Перенести",
+            callback_data=f"admin_bk_reschedule:{booking_id}"
+        )
+        builder.button(
+            text="❌ Отменить",
+            callback_data=f"admin_bk_cancel:{booking_id}"
+        )
+
+    if current_status == "cancelled":
+        builder.button(
+            text="🔄 Восстановить",
+            callback_data=f"admin_bk_restore:{booking_id}"
+        )
+
+    builder.button(
+        text="🗑 Удалить",
+        callback_data=f"admin_bk_delete:{booking_id}"
+    )
+
+    # Кнопка возврата к списку с сохранением страницы пагинации
+    builder.button(
+        text="◀ К списку",
+        callback_data=f"admin_bk_list:{page}"
+    )
+
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_admin_pagination_keyboard(
+    current_page: int,
+    total_pages: int,
+    filter_type: str = "all"
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура пагинации для списка бронирований.
+    Показывает кнопки перехода между страницами.
+
+    Args:
+        current_page: Текущая страница (начиная с 0)
+        total_pages: Всего страниц
+        filter_type: Активный фильтр (для сохранения при навигации)
+
+    Returns:
+        Строка с кнопками ◀ [1/5] ▶ + кнопки фильтров
+
+    Пример: ◀ Пред | 2 / 5 | След ▶
+    """
+    builder = InlineKeyboardBuilder()
+
+    # Кнопка "Предыдущая страница"
+    if current_page > 0:
+        builder.button(
+            text="◀ Пред",
+            callback_data=f"admin_bk_page:{current_page - 1}:{filter_type}"
+        )
+    else:
+        # Заглушка — кнопка есть, но не работает (для красивой вёрстки)
+        builder.button(text=" ", callback_data="ignore")
+
+    # Индикатор текущей страницы
+    builder.button(
+        text=f"{current_page + 1} / {total_pages}",
+        callback_data="ignore"
+    )
+
+    # Кнопка "Следующая страница"
+    if current_page < total_pages - 1:
+        builder.button(
+            text="След ▶",
+            callback_data=f"admin_bk_page:{current_page + 1}:{filter_type}"
+        )
+    else:
+        builder.button(text=" ", callback_data="ignore")
+
+    # Кнопки управления (фильтр и меню)
+    builder.button(text="🔍 Фильтр", callback_data="admin:bookings")
+    builder.button(text="◀ Меню", callback_data="admin:main")
+
+    # Строка пагинации — 3 кнопки, потом кнопки управления — 2
+    builder.adjust(3, 2)
+    return builder.as_markup()
+
+
+def get_admin_schedule_keyboard() -> InlineKeyboardMarkup:
+    """
+    Меню управления расписанием (временными слотами).
+
+    Кнопки:
+        ➕ Добавить рабочий день — создать слоты для новой даты
+        📅 Просмотр дня          — посмотреть слоты конкретного дня
+        🗑 Удалить слот          — убрать конкретное время
+        ◀ Главное меню
+    """
+    builder = InlineKeyboardBuilder()
+
+    builder.button(text="➕ Добавить рабочий день", callback_data="admin_sched:add_day")
+    builder.button(text="📅 Просмотр дня", callback_data="admin_sched:view_day")
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
+
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_admin_time_slots_keyboard() -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора времени для добавления в расписание.
+    Администратор добавляет рабочие часы нажатием кнопок.
+
+    Показывает стандартные рабочие часы с шагом 30 минут (9:00–20:00).
+
+    Returns:
+        Клавиатура с временными слотами для добавления
+    """
+    builder = InlineKeyboardBuilder()
+
+    # Генерируем временные слоты с 9:00 до 20:00 каждые 30 минут
+    times = []
+    for hour in range(9, 21):
+        times.append(f"{hour:02d}:00")
+        if hour < 20:  # Не добавляем 20:30
+            times.append(f"{hour:02d}:30")
+
+    for t in times:
+        builder.button(
+            text=f"🕐 {t}",
+            callback_data=f"admin_add_slot:{t}"
+        )
+
+    builder.button(text="✅ Готово", callback_data="admin_sched:done")
+    builder.button(text="❌ Отмена", callback_data="admin:schedule")
+
+    # По 4 кнопки времени в ряд, потом 2 кнопки управления
+    builder.adjust(4, 4, 4, 4, 4, 4, 2)
+    return builder.as_markup()
+
+
+def get_admin_slots_list_keyboard(slots: List[Dict]) -> InlineKeyboardMarkup:
+    """
+    Список слотов конкретного дня с возможностью удаления каждого.
+    Используется в просмотре расписания дня.
+
+    Args:
+        slots: Список всех слотов дня (свободных и занятых)
+
+    Returns:
+        Клавиатура со слотами и кнопками удаления
+    """
+    builder = InlineKeyboardBuilder()
+
+    for slot in slots:
+        time_str = slot["slot_time"][:5]
+        status = "🟢" if slot["is_available"] else "🔴"
+
+        # Информационная кнопка (не нажимается)
+        builder.button(
+            text=f"{status} {time_str}",
+            callback_data="ignore"
+        )
+
+        # Кнопка удаления слота
+        if slot["is_available"]:
+            builder.button(
+                text="🗑",
+                callback_data=f"admin_del_slot:{slot['id']}"
+            )
+        else:
+            # Занятый слот нельзя удалить
+            builder.button(text="📌", callback_data="ignore")
+
+    builder.button(text="◀ К расписанию", callback_data="admin:schedule")
+
+    # По 2 кнопки в ряд (время + удалить), последняя отдельно
+    row_widths = [2] * len(slots) + [1]
+    builder.adjust(*row_widths)
+    return builder.as_markup()
+
+
+def get_delete_confirm_keyboard(booking_id: str) -> InlineKeyboardMarkup:
+    """
+    Клавиатура подтверждения удаления бронирования.
+    Двойное подтверждение предотвращает случайное удаление.
+
+    Args:
+        booking_id: UUID бронирования для удаления
+
+    Returns:
+        Клавиатура с кнопками подтверждения и отмены
+    """
+    builder = InlineKeyboardBuilder()
+
+    builder.button(
+        text="🗑 Да, удалить",
+        callback_data=f"admin_bk_delete_confirm:{booking_id}"
+    )
+    builder.button(
+        text="◀ Отмена",
+        callback_data=f"admin_bk_view:{booking_id}"
+    )
+
+    builder.adjust(1)
+    return builder.as_markup()
