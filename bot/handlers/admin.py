@@ -1342,32 +1342,40 @@ async def handle_admin_create_booking_phone_invalid(message: Message):
 async def _show_admins_menu(target: Message, edit: bool = False) -> None:
     """
     Отображает экран управления администраторами.
-    Администраторы из .env показаны только в тексте (нельзя удалить через бот).
-    Администраторы из БД — показаны кнопками с возможностью удаления.
+    Единый плоский список всех администраторов.
+    Формат: Имя (@username) / Имя (ID xxx) / @username / ID xxx
+    Кнопки удаления — только для администраторов из БД.
     """
     db_admins = await db.get_all_admins()
     env_ids = settings.get_admin_ids()
 
+    # Строим единый список: env-администраторы первыми, затем из БД без дублей
+    db_admin_map = {a["telegram_id"]: a for a in db_admins}
+    all_ids = list(dict.fromkeys(env_ids + [a["telegram_id"] for a in db_admins]))
+
     lines = ["👥 <b>Администраторы NailStory</b>\n"]
 
-    if env_ids:
-        lines.append("🔒 <b>Из настроек сервера (.env):</b>")
-        for eid in env_ids:
-            # Пробуем найти username по user_id в таблице bookings
-            uname = await db.get_username_by_user_id(eid)
-            label = f"@{uname}" if uname else f"<code>{eid}</code>"
+    if not all_ids:
+        lines.append("Список пуст.")
+    else:
+        for tid in all_ids:
+            full_name, uname = await db.get_user_display_info(tid)
+            # Для DB-администраторов берём username из таблицы admins как запасной вариант
+            if not uname and tid in db_admin_map:
+                uname = db_admin_map[tid].get("username")
+            # Имя (юзернейм) / Имя (ID) / @юзернейм / ID
+            if full_name and uname:
+                label = f"{full_name} (@{uname})"
+            elif full_name:
+                label = f"{full_name} (ID {tid})"
+            elif uname:
+                label = f"@{uname}"
+            else:
+                label = f"ID {tid}"
             lines.append(f"  • {label}")
-        lines.append("")
 
     if db_admins:
-        lines.append("👤 <b>Добавлены через бот:</b>")
-        for a in db_admins:
-            label = f"@{a['username']}" if a.get("username") else f"ID {a['telegram_id']}"
-            lines.append(f"  • {label}")
-        lines.append("")
-        lines.append("Нажмите чтобы удалить:")
-    elif not env_ids:
-        lines.append("Список пуст.")
+        lines.append("\nНажмите кнопку ниже чтобы удалить:")
 
     text = "\n".join(lines)
     kb = get_admin_admins_keyboard(db_admins)

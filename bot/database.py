@@ -575,6 +575,30 @@ async def get_username_by_user_id(user_id: int) -> Optional[str]:
         return None
 
 
+async def get_user_display_info(user_id: int) -> tuple:
+    """
+    Возвращает (full_name, username) из последнего бронирования пользователя.
+    Используется для красивого отображения в списке администраторов.
+    Оба значения могут быть None если пользователь не делал записей через бот.
+    """
+    try:
+        response = (
+            supabase.table("bookings")
+            .select("full_name, username")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if response.data:
+            row = response.data[0]
+            return row.get("full_name"), row.get("username")
+        return None, None
+    except Exception as e:
+        logger.error(f"Ошибка получения данных пользователя {user_id}: {e}")
+        return None, None
+
+
 async def get_survey_by_booking_id(booking_id: str) -> Optional[Dict]:
     """
     Возвращает пожелания клиента по ID конкретного бронирования.
