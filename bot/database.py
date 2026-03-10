@@ -528,6 +528,30 @@ async def remove_admin(telegram_id: int) -> bool:
         return False
 
 
+async def find_user_id_by_username(username: str) -> Optional[int]:
+    """
+    Ищет Telegram ID пользователя по его username в таблице bookings.
+    username передаётся без символа @, поиск без учёта регистра.
+    Возвращает user_id последней записи клиента, или None если не найден.
+    """
+    try:
+        clean = username.lstrip("@").lower()
+        response = (
+            supabase.table("bookings")
+            .select("user_id")
+            .ilike("username", clean)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if response.data:
+            return response.data[0]["user_id"]
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка поиска user_id по username @{username}: {e}")
+        return None
+
+
 async def get_survey_by_booking_id(booking_id: str) -> Optional[Dict]:
     """
     Возвращает пожелания клиента по ID конкретного бронирования.

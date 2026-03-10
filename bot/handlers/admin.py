@@ -4,7 +4,7 @@
 
 import logging
 from datetime import date
-from aiogram import Router, F, BaseMiddleware
+from aiogram import Router, F, BaseMiddleware, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, TelegramObject
@@ -1359,15 +1359,12 @@ async def _show_admins_menu(target: Message, edit: bool = False) -> None:
     if db_admins:
         lines.append("👤 <b>Добавлены через бот:</b>")
         for a in db_admins:
-            label = f"@{a['username']}" if a.get("username") else str(a["telegram_id"])
-            lines.append(f"  • {label} — <code>{a['telegram_id']}</code>")
+            label = f"@{a['username']}" if a.get("username") else f"ID {a['telegram_id']}"
+            lines.append(f"  • {label}")
         lines.append("")
-
-    if not env_ids and not db_admins:
+        lines.append("Нажмите чтобы удалить:")
+    elif not env_ids:
         lines.append("Список пуст.")
-        lines.append("")
-
-    lines.append("Нажмите на администратора из БД чтобы удалить его:")
 
     text = "\n".join(lines)
     kb = get_admin_admins_keyboard(db_admins)
@@ -1396,55 +1393,72 @@ async def handle_admin_mgmt_add(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         text=(
             "👥 <b>Добавление администратора</b>\n\n"
-            "Введите <b>Telegram ID</b> нового администратора.\n\n"
-            "Попросите кандидата узнать свой ID через бота "
-            "<a href='https://t.me/userinfobot'>@userinfobot</a>."
+            "Введите <b>@юзернейм</b> нового администратора.\n\n"
+            "Пользователь должен хотя бы раз написать боту (/start), "
+            "чтобы система его нашла."
         ),
         reply_markup=builder.as_markup(),
         parse_mode="HTML",
-        disable_web_page_preview=True,
     )
 
 
 @router.message(AdminMgmtStates.waiting_new_admin_id, F.text)
-async def handle_admin_mgmt_id_input(message: Message, state: FSMContext):
+async def handle_admin_mgmt_username_input(message: Message, state: FSMContext, bot: Bot):
     raw = message.text.strip()
+    username = raw.lstrip("@")
 
-    if not raw.lstrip("-").isdigit():
+    if not username:
         builder = InlineKeyboardBuilder()
         builder.button(text="❌ Отмена", callback_data="admin:admins")
         await message.answer(
-            "❌ Введите числовой Telegram ID, например: <code>123456789</code>",
+            "❌ Введите @юзернейм, например: <code>@manager</code>",
             reply_markup=builder.as_markup(),
             parse_mode="HTML",
         )
         return
 
-    new_id = int(raw)
+    # Шаг 1: ищем в таблице bookings (клиенты, уже пользовавшиеся ботом)
+    user_id = await db.find_user_id_by_username(username)
 
-    # Уже является администратором из .env
-    if new_id in settings.get_admin_ids():
+    # Шаг 2: пробуем Bot API — get_chat работает для публичных аккаунтов
+    # и пользователей, ранее взаимодействовавших с ботом
+    if user_id is None:
+        try:
+            chat = await bot.get_chat(f"@{username}")
+            user_id = chat.id
+        except Exception:
+            pass
+
+    if user_id is None:
         builder = InlineKeyboardBuilder()
-        builder.button(text="◀ К администраторам", callback_data="admin:admins")
-        await state.clear()
+        builder.button(text="❌ Отмена", callback_data="admin:admins")
         await message.answer(
-            "ℹ️ Этот пользователь уже является администратором (задан в настройках сервера).",
+            f"❌ Пользователь @{username} не найден.\n\n"
+            "Попросите его отправить /start боту и попробуйте ещё раз.",
             reply_markup=builder.as_markup(),
         )
         return
 
-    ok = await db.add_admin(telegram_id=new_id)
     await state.clear()
-
     builder = InlineKeyboardBuilder()
     builder.button(text="◀ К администраторам", callback_data="admin:admins")
+
+    # Уже является администратором из .env
+    if user_id in settings.get_admin_ids():
+        await message.answer(
+            f"ℹ️ @{username} уже является администратором (задан в настройках сервера).",
+            reply_markup=builder.as_markup(),
+        )
+        return
+
+    # Уже есть в БД — обновляем username на случай если изменился
+    ok = await db.add_admin(telegram_id=user_id, username=username)
 
     if ok:
         _invalidate_admin_cache()
         await message.answer(
-            f"✅ Администратор <code>{new_id}</code> добавлен.",
+            f"✅ Администратор @{username} добавлен.",
             reply_markup=builder.as_markup(),
-            parse_mode="HTML",
         )
     else:
         await message.answer(
@@ -1454,9 +1468,9 @@ async def handle_admin_mgmt_id_input(message: Message, state: FSMContext):
 
 
 @router.message(AdminMgmtStates.waiting_new_admin_id)
-async def handle_admin_mgmt_id_input_invalid(message: Message):
+async def handle_admin_mgmt_username_input_invalid(message: Message):
     await message.answer(
-        "❌ Введите числовой Telegram ID, например: <code>123456789</code>",
+        "❌ Введите @юзернейм, например: <code>@manager</code>",
         parse_mode="HTML",
     )
 

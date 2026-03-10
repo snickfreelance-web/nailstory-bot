@@ -212,8 +212,8 @@ def get_admin_admins_keyboard(db_admins: List[Dict]) -> InlineKeyboardMarkup:
         db_admins: Список записей из таблицы admins
 
     Пример:
-        [🗑 @manager — 123456789]
-        [🗑 987654321]
+        [🗑 @manager]
+        [🗑 @assistant]
         [➕ Добавить администратора]
         [◀ Главное меню]
     """
