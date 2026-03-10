@@ -19,6 +19,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from bot.config import settings
 from bot.handlers import common, user, admin
+import bot.database as db
 
 
 # ===================================================
@@ -54,6 +55,13 @@ async def main():
 
     logger.info("🚀 Запуск бота NailStory...")
     logger.info(f"Администраторы: {settings.get_admin_ids()}")
+
+    # ---------------------------------------------------
+    # Инициализируем синхронный клиент Supabase
+    # ---------------------------------------------------
+    # ВАЖНО: вызывать до start_polling, чтобы клиент был готов
+    # к моменту первого запроса к БД.
+    db.init_supabase()
 
     # ---------------------------------------------------
     # Создаём объект бота

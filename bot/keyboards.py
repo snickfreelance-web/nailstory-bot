@@ -192,9 +192,10 @@ def get_admin_main_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="💅 Услуги", callback_data="admin:services")
     builder.button(text="📅 Расписание", callback_data="admin:schedule")
     builder.button(text="📊 Статистика", callback_data="admin:stats")
+    builder.button(text="➕ Создать запись", callback_data="admin:create_booking")
 
-    # Две кнопки в ряд
-    builder.adjust(2)
+    # Первые 4 кнопки по 2 в ряд, последняя отдельно
+    builder.adjust(2, 2, 1)
 
     return builder.as_markup()
 

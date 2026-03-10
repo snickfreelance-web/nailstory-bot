@@ -1,18 +1,6 @@
 # ===================================================
 # handlers/admin.py — Полная административная панель
 # ===================================================
-# Все хэндлеры для администраторов бота.
-# Доступ только для пользователей из ADMIN_IDS.
-#
-# Разделы:
-#   1. Middleware проверки прав
-#   2. Главное меню /admin
-#   3. Управление услугами (CRUD)
-#   4. Просмотр бронирований (с фильтрами и пагинацией)
-#   5. Действия с бронированиями (подтвердить/перенести/отменить/удалить)
-#   6. Управление расписанием (слоты)
-#   7. Статистика
-# ===================================================
 
 import logging
 from datetime import date
@@ -24,7 +12,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from typing import Callable, Dict, Any, Awaitable
 
 from bot.config import settings
-from bot.states import AdminServiceStates, AdminSlotStates, AdminRescheduleStates
+from bot.states import AdminServiceStates, AdminSlotStates, AdminRescheduleStates, AdminBookingStates
 from bot.keyboards import (
     get_admin_main_keyboard,
     get_admin_services_keyboard,
@@ -44,12 +32,14 @@ from bot.utils.validators import (
     format_status_ru,
     is_valid_price,
     parse_date,
+    is_valid_phone,
+    normalize_phone,
 )
+from bot.utils.calendar import build_time_slots_keyboard
 from bot import database as db
 
 logger = logging.getLogger(__name__)
 
-# Количество бронирований на одной странице (пагинация)
 BOOKINGS_PER_PAGE = 8
 
 
@@ -58,33 +48,12 @@ BOOKINGS_PER_PAGE = 8
 # ===================================================
 
 class AdminMiddleware(BaseMiddleware):
-    """
-    Middleware — промежуточный слой обработки запросов.
-    Вызывается ПЕРЕД каждым хэндлером в этом роутере.
-
-    Проверяет, является ли пользователь администратором.
-    Если нет — отправляет сообщение об отказе и прерывает обработку.
-
-    Преимущество middleware перед отдельной проверкой в каждом хэндлере:
-    — DRY: не нужно повторять проверку в каждой функции
-    — Безопасность: невозможно случайно забыть добавить проверку
-    """
-
     async def __call__(
         self,
         handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
         event: TelegramObject,
         data: Dict[str, Any],
     ) -> Any:
-        """
-        Метод вызывается для каждого события (сообщение или callback).
-
-        Args:
-            handler: Следующий хэндлер в цепочке (или следующий middleware)
-            event: Событие от Telegram (Message или CallbackQuery)
-            data: Словарь с дополнительными данными (FSM, бот и т.д.)
-        """
-        # Определяем ID пользователя независимо от типа события
         user_id = None
 
         if hasattr(event, "from_user") and event.from_user:
@@ -95,19 +64,16 @@ class AdminMiddleware(BaseMiddleware):
         admin_ids = settings.get_admin_ids()
 
         if user_id not in admin_ids:
-            # Пользователь не является администратором
             if hasattr(event, "answer"):
                 await event.answer("⛔ У вас нет доступа к этой команде.")
             elif hasattr(event, "message"):
                 await event.message.answer("⛔ У вас нет доступа.")
                 await event.answer()
-            return  # Прерываем обработку — хэндлер не вызывается
+            return
 
-        # Пользователь — администратор, продолжаем обработку
         return await handler(event, data)
 
 
-# Создаём роутер и добавляем middleware
 router = Router()
 router.message.middleware(AdminMiddleware())
 router.callback_query.middleware(AdminMiddleware())
@@ -118,16 +84,6 @@ router.callback_query.middleware(AdminMiddleware())
 # ===================================================
 
 def format_booking_card(booking: Dict) -> str:
-    """
-    Форматирует данные бронирования в читаемую карточку.
-    Используется в списке и детальном просмотре.
-
-    Args:
-        booking: Словарь с данными бронирования (включая services)
-
-    Returns:
-        Отформатированная строка для отправки в Telegram
-    """
     service_name = booking.get("services", {}).get("name", "Неизвестно")
     service_price = booking.get("services", {}).get("price", "—")
     date_display = format_date_ru(booking["booking_date"])
@@ -151,13 +107,7 @@ def format_booking_card(booking: Dict) -> str:
 
 @router.message(Command("admin"))
 async def handle_admin_command(message: Message, state: FSMContext):
-    """
-    Точка входа в админ-панель.
-    Доступна по команде /admin.
-    Middleware уже проверил права — если мы здесь, пользователь — администратор.
-    """
-    await state.clear()  # Сбрасываем любые активные состояния
-
+    await state.clear()
     logger.info(f"Администратор {message.from_user.id} открыл панель")
 
     await message.answer(
@@ -172,9 +122,6 @@ async def handle_admin_command(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "admin:main")
 async def handle_admin_main_menu(callback: CallbackQuery, state: FSMContext):
-    """
-    Возврат в главное меню админки из любого подраздела.
-    """
     await callback.answer()
     await state.clear()
 
@@ -191,18 +138,13 @@ async def handle_admin_main_menu(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "admin:stats")
 async def handle_admin_stats(callback: CallbackQuery):
-    """
-    Показывает сводную статистику по бронированиям.
-    """
     await callback.answer()
 
-    # Загружаем счётчики параллельно
     total = await db.get_bookings_count()
     pending = await db.get_bookings_count("pending")
     confirmed = await db.get_bookings_count("confirmed")
     cancelled = await db.get_bookings_count("cancelled")
 
-    # Загружаем записи на сегодня
     today_str = date.today().strftime("%Y-%m-%d")
     today_bookings = await db.get_upcoming_bookings_for_date(today_str)
 
@@ -229,14 +171,9 @@ async def handle_admin_stats(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin:services")
 async def handle_admin_services(callback: CallbackQuery, state: FSMContext):
-    """
-    Открывает раздел управления услугами.
-    Загружает ВСЕ услуги (включая скрытые от клиентов).
-    """
     await callback.answer()
     await state.clear()
 
-    # active_only=False — показываем все услуги в админке
     services = await db.get_all_services(active_only=False)
 
     if not services:
@@ -258,20 +195,11 @@ async def handle_admin_services(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin_svc:"))
 async def handle_admin_service_action(callback: CallbackQuery, state: FSMContext):
-    """
-    Обрабатывает нажатие на конкретную услугу в списке.
-    Показывает детальную карточку услуги с кнопками управления.
-
-    callback_data:
-        "admin_svc:uuid"  — просмотр конкретной услуги
-        "admin_svc:add"   — начало добавления новой услуги
-    """
     await callback.answer()
 
     action = callback.data.split(":", 1)[1]
 
     if action == "add":
-        # Начинаем добавление новой услуги
         await state.set_state(AdminServiceStates.waiting_name)
 
         builder = InlineKeyboardBuilder()
@@ -287,7 +215,6 @@ async def handle_admin_service_action(callback: CallbackQuery, state: FSMContext
             parse_mode="HTML",
         )
     else:
-        # Просматриваем конкретную услугу
         service_id = action
         service = await db.get_service_by_id(service_id)
 
@@ -310,12 +237,9 @@ async def handle_admin_service_action(callback: CallbackQuery, state: FSMContext
         )
 
 
-@router.message(AdminServiceStates.waiting_name)
+# ФИX #2: добавлен F.text — защита от нетекстовых сообщений
+@router.message(AdminServiceStates.waiting_name, F.text)
 async def handle_admin_service_name(message: Message, state: FSMContext):
-    """
-    Получает название новой услуги от администратора.
-    Шаг 1 из 3 при добавлении услуги.
-    """
     name = message.text.strip()
 
     if len(name) < 3:
@@ -326,10 +250,7 @@ async def handle_admin_service_name(message: Message, state: FSMContext):
         await message.answer("❌ Название слишком длинное. Максимум 100 символов.")
         return
 
-    # Сохраняем название в FSM
     await state.update_data(service_name=name)
-
-    # Переходим к выбору длительности
     await state.set_state(AdminServiceStates.waiting_duration)
 
     await message.answer(
@@ -342,18 +263,18 @@ async def handle_admin_service_name(message: Message, state: FSMContext):
     )
 
 
+# Catch-хендлер для нетекстовых сообщений на шаге названия
+@router.message(AdminServiceStates.waiting_name)
+async def handle_admin_service_name_invalid(message: Message):
+    await message.answer("❌ Пожалуйста, введите название услуги текстом.")
+
+
 @router.callback_query(AdminServiceStates.waiting_duration, F.data.startswith("duration:"))
 async def handle_admin_service_duration(callback: CallbackQuery, state: FSMContext):
-    """
-    Получает длительность услуги через кнопку.
-    Шаг 2 из 3. Используем кнопки вместо ввода числа — удобнее и безопаснее.
-    """
     await callback.answer()
 
     duration = int(callback.data.split(":")[1])
     await state.update_data(service_duration=duration)
-
-    # Переходим к вводу цены
     await state.set_state(AdminServiceStates.waiting_price)
 
     fsm_data = await state.get_data()
@@ -373,12 +294,10 @@ async def handle_admin_service_duration(callback: CallbackQuery, state: FSMConte
     )
 
 
-@router.message(AdminServiceStates.waiting_price)
+# ФИX #2: добавлен F.text
+# ФИX #3: state.clear() только при успехе — при ошибке можно повторить
+@router.message(AdminServiceStates.waiting_price, F.text)
 async def handle_admin_service_price(message: Message, state: FSMContext):
-    """
-    Получает цену услуги и создаёт услугу в БД.
-    Финальный шаг (3 из 3) добавления услуги.
-    """
     price_str = message.text.strip()
 
     if not is_valid_price(price_str):
@@ -392,16 +311,16 @@ async def handle_admin_service_price(message: Message, state: FSMContext):
     price = int(price_str)
     fsm_data = await state.get_data()
 
-    # Создаём услугу в БД
     service = await db.add_service(
         name=fsm_data["service_name"],
         duration_min=fsm_data["service_duration"],
         price=price,
     )
 
-    await state.clear()
-
     if service:
+        # ФИX #3: очищаем состояние только при успехе
+        await state.clear()
+
         builder = InlineKeyboardBuilder()
         builder.button(text="💅 К списку услуг", callback_data="admin:services")
         builder.button(text="➕ Добавить ещё", callback_data="admin_svc:add")
@@ -418,62 +337,69 @@ async def handle_admin_service_price(message: Message, state: FSMContext):
             parse_mode="HTML",
         )
     else:
-        await message.answer("❌ Ошибка при добавлении услуги. Попробуйте ещё раз.")
+        # DB-ошибка: повтор той же цены не поможет → очищаем состояние
+        await state.clear()
+        builder = InlineKeyboardBuilder()
+        builder.button(text="◀ К списку услуг", callback_data="admin:services")
+        await message.answer(
+            "❌ <b>Ошибка при добавлении услуги.</b>\n\n"
+            "Проверьте, что в <code>.env</code> указан ключ "
+            "<b>service_role</b> от Supabase (не anon).\n\n"
+            "Settings → API → service_role (secret)",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
 
 
+# Catch-хендлер для нетекстовых сообщений на шаге цены
+@router.message(AdminServiceStates.waiting_price)
+async def handle_admin_service_price_invalid(message: Message):
+    await message.answer(
+        "❌ Введите цену числом, например: <code>1500</code>",
+        parse_mode="HTML",
+    )
+
+
+# ФИX #1: убран первый callback.answer() — теперь отвечаем один раз с нужным текстом
 @router.callback_query(F.data.startswith("admin_svc_hide:"))
 async def handle_admin_service_hide(callback: CallbackQuery):
-    """Скрывает услугу от клиентов (is_active = false)."""
-    await callback.answer()
     service_id = callback.data.split(":", 1)[1]
-
     success = await db.toggle_service_status(service_id, False)
 
     if success:
         await callback.answer("🔴 Услуга скрыта от клиентов", show_alert=True)
+        services = await db.get_all_services(active_only=False)
+        await callback.message.edit_reply_markup(
+            reply_markup=get_admin_services_keyboard(services)
+        )
     else:
         await callback.answer("❌ Ошибка. Попробуйте ещё раз.", show_alert=True)
 
-    # Обновляем список услуг
-    services = await db.get_all_services(active_only=False)
-    await callback.message.edit_reply_markup(
-        reply_markup=get_admin_services_keyboard(services)
-    )
 
-
+# ФИX #1: убран первый callback.answer()
 @router.callback_query(F.data.startswith("admin_svc_show:"))
 async def handle_admin_service_show(callback: CallbackQuery):
-    """Делает услугу видимой для клиентов (is_active = true)."""
-    await callback.answer()
     service_id = callback.data.split(":", 1)[1]
-
     success = await db.toggle_service_status(service_id, True)
 
     if success:
         await callback.answer("✅ Услуга снова доступна клиентам", show_alert=True)
+        services = await db.get_all_services(active_only=False)
+        await callback.message.edit_reply_markup(
+            reply_markup=get_admin_services_keyboard(services)
+        )
     else:
         await callback.answer("❌ Ошибка. Попробуйте ещё раз.", show_alert=True)
-
-    services = await db.get_all_services(active_only=False)
-    await callback.message.edit_reply_markup(
-        reply_markup=get_admin_services_keyboard(services)
-    )
 
 
 @router.callback_query(F.data.startswith("admin_svc_del:"))
 async def handle_admin_service_delete(callback: CallbackQuery):
-    """
-    Удаляет услугу из БД.
-    Если у услуги есть бронирования — предлагает скрыть вместо удаления.
-    """
     await callback.answer()
     service_id = callback.data.split(":", 1)[1]
 
-    # Проверяем наличие бронирований
     has_bookings = await db.service_has_bookings(service_id)
 
     if has_bookings:
-        # Нельзя удалить — есть история бронирований
         builder = InlineKeyboardBuilder()
         builder.button(text="🔴 Скрыть вместо удаления", callback_data=f"admin_svc_hide:{service_id}")
         builder.button(text="◀ Назад", callback_data=f"admin_svc:{service_id}")
@@ -492,7 +418,6 @@ async def handle_admin_service_delete(callback: CallbackQuery):
         )
         return
 
-    # Можно удалить — бронирований нет
     success = await db.delete_service(service_id)
 
     if success:
@@ -517,10 +442,6 @@ async def handle_admin_service_delete(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin:bookings")
 async def handle_admin_bookings(callback: CallbackQuery, state: FSMContext):
-    """
-    Открывает раздел просмотра бронирований.
-    Показывает клавиатуру фильтрации.
-    """
     await callback.answer()
     await state.clear()
 
@@ -536,19 +457,13 @@ async def handle_admin_bookings(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin_bk_filter:"))
 async def handle_admin_bookings_filter(callback: CallbackQuery, state: FSMContext):
-    """
-    Применяет выбранный фильтр и показывает список бронирований.
-
-    callback_data: "admin_bk_filter:all|pending|confirmed|cancelled|date"
-    """
     await callback.answer()
 
     filter_type = callback.data.split(":", 1)[1]
 
     if filter_type == "date":
-        # Запрашиваем дату у администратора текстом
         await state.set_state(AdminSlotStates.waiting_date)
-        await state.update_data(filter_context="bookings")  # Помним зачем просим дату
+        await state.update_data(filter_context="bookings")
 
         builder = InlineKeyboardBuilder()
         builder.button(text="❌ Отмена", callback_data="admin:bookings")
@@ -563,7 +478,6 @@ async def handle_admin_bookings_filter(callback: CallbackQuery, state: FSMContex
         )
         return
 
-    # Загружаем бронирования с пагинацией
     status = None if filter_type == "all" else filter_type
     await _show_bookings_page(callback.message, page=0, filter_type=filter_type, status=status, edit=True)
 
@@ -576,18 +490,6 @@ async def _show_bookings_page(
     date_filter: str = None,
     edit: bool = False
 ):
-    """
-    Вспомогательная функция отображения страницы бронирований.
-    Вынесена отдельно чтобы переиспользовать в нескольких хэндлерах.
-
-    Args:
-        message: Объект сообщения для редактирования/отправки
-        page: Номер страницы (0-based)
-        filter_type: Тип фильтра для передачи в кнопки пагинации
-        status: SQL-фильтр по статусу
-        date_filter: SQL-фильтр по дате
-        edit: True = редактируем существующее, False = новое сообщение
-    """
     offset = page * BOOKINGS_PER_PAGE
     bookings = await db.get_all_bookings(
         status_filter=status,
@@ -613,7 +515,6 @@ async def _show_bookings_page(
             await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
         return
 
-    # Строим список бронирований
     lines = [f"📋 <b>Бронирования</b> (стр. {page + 1}/{total_pages}, всего: {total})\n"]
 
     builder = InlineKeyboardBuilder()
@@ -624,13 +525,11 @@ async def _show_bookings_page(
         date_str = format_date_ru(booking["booking_date"])
         status_icon = {"pending": "⏳", "confirmed": "✅", "cancelled": "❌"}.get(booking["status"], "?")
 
-        # Краткая строка для списка
         lines.append(
             f"{i}. {status_icon} {booking['full_name']}\n"
             f"   {service_name} | {date_str} {time_str}"
         )
 
-        # Кнопка для открытия детальной карточки
         builder.button(
             text=f"{i}. {booking['full_name'][:20]}",
             callback_data=f"admin_bk_view:{booking['id']}"
@@ -638,11 +537,9 @@ async def _show_bookings_page(
 
     text = "\n".join(lines)
 
-    # Добавляем пагинацию
-    builder.adjust(2)  # Кнопки бронирований по 2 в ряд
+    builder.adjust(2)
     pagination_kb = get_admin_pagination_keyboard(page, total_pages, filter_type)
 
-    # Объединяем: список + пагинация
     for btn_row in pagination_kb.inline_keyboard:
         builder.row(*btn_row)
 
@@ -654,16 +551,11 @@ async def _show_bookings_page(
 
 @router.callback_query(F.data.startswith("admin_bk_page:"))
 async def handle_admin_bookings_page(callback: CallbackQuery):
-    """
-    Навигация по страницам списка бронирований.
-    callback_data: "admin_bk_page:2:pending" (страница:фильтр)
-    """
     await callback.answer()
 
     parts = callback.data.split(":")
     page = int(parts[1])
     filter_type = parts[2] if len(parts) > 2 else "all"
-
     status = None if filter_type == "all" else filter_type
 
     await _show_bookings_page(
@@ -677,7 +569,6 @@ async def handle_admin_bookings_page(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_bk_list:"))
 async def handle_admin_back_to_list(callback: CallbackQuery):
-    """Возврат к списку бронирований с сохранением страницы."""
     await callback.answer()
 
     page = int(callback.data.split(":")[1])
@@ -690,10 +581,6 @@ async def handle_admin_back_to_list(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_bk_view:"))
 async def handle_admin_booking_view(callback: CallbackQuery, state: FSMContext):
-    """
-    Показывает детальную карточку бронирования.
-    Открывается при нажатии на строку в списке.
-    """
     await callback.answer()
 
     booking_id = callback.data.split(":", 1)[1]
@@ -717,7 +604,6 @@ async def handle_admin_booking_view(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin_bk_confirm:"))
 async def handle_admin_booking_confirm(callback: CallbackQuery):
-    """Подтверждает бронирование (pending → confirmed)."""
     await callback.answer()
 
     booking_id = callback.data.split(":", 1)[1]
@@ -725,7 +611,6 @@ async def handle_admin_booking_confirm(callback: CallbackQuery):
 
     if success:
         await callback.answer("✅ Бронирование подтверждено!", show_alert=True)
-        # Обновляем карточку
         booking = await db.get_booking_by_id(booking_id)
         if booking:
             await callback.message.edit_text(
@@ -739,12 +624,10 @@ async def handle_admin_booking_confirm(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_bk_cancel:"))
 async def handle_admin_booking_cancel(callback: CallbackQuery):
-    """Отменяет бронирование (любой статус → cancelled)."""
     await callback.answer()
 
     booking_id = callback.data.split(":", 1)[1]
 
-    # Сначала освобождаем слот
     booking = await db.get_booking_by_id(booking_id)
     if booking:
         slot = await db.get_slot_by_date_time(booking["booking_date"], booking["booking_time"])
@@ -768,12 +651,10 @@ async def handle_admin_booking_cancel(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_bk_restore:"))
 async def handle_admin_booking_restore(callback: CallbackQuery):
-    """Восстанавливает отменённое бронирование (cancelled → pending)."""
     await callback.answer()
 
     booking_id = callback.data.split(":", 1)[1]
 
-    # Проверяем: слот всё ещё свободен?
     booking = await db.get_booking_by_id(booking_id)
     if booking:
         slot = await db.get_slot_by_date_time(booking["booking_date"], booking["booking_time"])
@@ -801,10 +682,6 @@ async def handle_admin_booking_restore(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_bk_delete:"))
 async def handle_admin_booking_delete_confirm_prompt(callback: CallbackQuery):
-    """
-    Запрашивает подтверждение перед удалением бронирования.
-    Двойное подтверждение предотвращает случайное удаление.
-    """
     await callback.answer()
 
     booking_id = callback.data.split(":", 1)[1]
@@ -822,7 +699,6 @@ async def handle_admin_booking_delete_confirm_prompt(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_bk_delete_confirm:"))
 async def handle_admin_booking_delete(callback: CallbackQuery):
-    """Выполняет окончательное удаление бронирования."""
     await callback.answer()
 
     booking_id = callback.data.split(":", 1)[1]
@@ -850,10 +726,6 @@ async def handle_admin_booking_delete(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_bk_reschedule:"))
 async def handle_admin_reschedule_start(callback: CallbackQuery, state: FSMContext):
-    """
-    Начинает процесс переноса бронирования.
-    Запрашивает новую дату.
-    """
     await callback.answer()
 
     booking_id = callback.data.split(":", 1)[1]
@@ -863,7 +735,6 @@ async def handle_admin_reschedule_start(callback: CallbackQuery, state: FSMConte
         await callback.answer("Бронирование не найдено", show_alert=True)
         return
 
-    # Сохраняем данные переноса в FSM
     await state.set_state(AdminRescheduleStates.waiting_new_date)
     await state.update_data(
         reschedule_booking_id=booking_id,
@@ -871,7 +742,6 @@ async def handle_admin_reschedule_start(callback: CallbackQuery, state: FSMConte
         reschedule_old_time=booking["booking_time"],
     )
 
-    # Ищем ID старого слота
     old_slot = await db.get_slot_by_date_time(booking["booking_date"], booking["booking_time"])
     if old_slot:
         await state.update_data(reschedule_old_slot_id=old_slot["id"])
@@ -892,11 +762,9 @@ async def handle_admin_reschedule_start(callback: CallbackQuery, state: FSMConte
     )
 
 
-@router.message(AdminRescheduleStates.waiting_new_date)
+# ФИX #2: добавлен F.text
+@router.message(AdminRescheduleStates.waiting_new_date, F.text)
 async def handle_admin_reschedule_date(message: Message, state: FSMContext):
-    """
-    Получает новую дату переноса и показывает доступные слоты.
-    """
     parsed = parse_date(message.text.strip())
 
     if not parsed:
@@ -910,7 +778,6 @@ async def handle_admin_reschedule_date(message: Message, state: FSMContext):
     year, month, day, date_obj = parsed
     date_str = date_obj.strftime("%Y-%m-%d")
 
-    # Загружаем свободные слоты
     slots = await db.get_available_slots(date_str)
 
     if not slots:
@@ -923,7 +790,6 @@ async def handle_admin_reschedule_date(message: Message, state: FSMContext):
     await state.update_data(reschedule_new_date=date_str)
     await state.set_state(AdminRescheduleStates.waiting_new_time)
 
-    from bot.utils.calendar import build_time_slots_keyboard
     time_keyboard = build_time_slots_keyboard(slots)
 
     await message.answer(
@@ -933,16 +799,22 @@ async def handle_admin_reschedule_date(message: Message, state: FSMContext):
     )
 
 
+# Catch-хендлер для нетекстовых сообщений
+@router.message(AdminRescheduleStates.waiting_new_date)
+async def handle_admin_reschedule_date_invalid(message: Message):
+    await message.answer(
+        "❌ Введите дату текстом в формате <code>ДД.ММ.ГГГГ</code>",
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(AdminRescheduleStates.waiting_new_time, F.data.startswith("slot:"))
 async def handle_admin_reschedule_time(callback: CallbackQuery, state: FSMContext):
-    """
-    Получает новое время и выполняет перенос бронирования.
-    """
     await callback.answer()
 
     parts = callback.data.split(":")
     new_slot_id = parts[1]
-    new_time = f"{parts[2]}:{parts[3]}:00"  # HH:MM:SS
+    new_time = f"{parts[2]}:{parts[3]}:00"
 
     fsm_data = await state.get_data()
     await state.clear()
@@ -983,7 +855,6 @@ async def handle_admin_reschedule_time(callback: CallbackQuery, state: FSMContex
 
 @router.callback_query(F.data == "admin:schedule")
 async def handle_admin_schedule(callback: CallbackQuery, state: FSMContext):
-    """Открывает раздел управления расписанием."""
     await callback.answer()
     await state.clear()
 
@@ -1000,10 +871,9 @@ async def handle_admin_schedule(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "admin_sched:add_day")
 async def handle_admin_sched_add_day(callback: CallbackQuery, state: FSMContext):
-    """Запрашивает дату для создания нового рабочего дня."""
     await callback.answer()
     await state.set_state(AdminSlotStates.waiting_date)
-    await state.update_data(filter_context="schedule")  # Контекст: добавление слотов
+    await state.update_data(filter_context="schedule")
 
     builder = InlineKeyboardBuilder()
     builder.button(text="❌ Отмена", callback_data="admin:schedule")
@@ -1019,13 +889,10 @@ async def handle_admin_sched_add_day(callback: CallbackQuery, state: FSMContext)
     )
 
 
-@router.message(AdminSlotStates.waiting_date)
+# ФИX #2: добавлен F.text
+# ФИX #4: добавлена ветка view_slots — теперь "Просмотр дня" показывает существующие слоты
+@router.message(AdminSlotStates.waiting_date, F.text)
 async def handle_admin_sched_date(message: Message, state: FSMContext):
-    """
-    Обрабатывает введённую дату.
-    Если контекст = "schedule" → показываем слоты для добавления.
-    Если контекст = "bookings" → показываем бронирования за день.
-    """
     parsed = parse_date(message.text.strip())
 
     if not parsed:
@@ -1043,7 +910,6 @@ async def handle_admin_sched_date(message: Message, state: FSMContext):
     context = fsm_data.get("filter_context", "schedule")
 
     if context == "bookings":
-        # Показываем бронирования за выбранную дату
         await state.clear()
         await _show_bookings_page(
             message,
@@ -1054,7 +920,29 @@ async def handle_admin_sched_date(message: Message, state: FSMContext):
         )
         return
 
-    # Контекст schedule: показываем выбор временных слотов
+    # ФИX #4: контекст view_slots — показываем существующие слоты дня
+    if context == "view_slots":
+        await state.clear()
+        slots = await db.get_all_slots_for_date(date_str)
+
+        if not slots:
+            builder = InlineKeyboardBuilder()
+            builder.button(text="◀ К расписанию", callback_data="admin:schedule")
+            await message.answer(
+                f"📅 <b>{format_date_ru(date_str)}</b>\n\nНа этот день слотов нет.",
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML",
+            )
+            return
+
+        await message.answer(
+            text=f"📅 <b>{format_date_ru(date_str)}</b>\n\n🟢 — свободен  🔴 — занят",
+            reply_markup=get_admin_slots_list_keyboard(slots),
+            parse_mode="HTML",
+        )
+        return
+
+    # Контекст schedule: показываем выбор временных слотов для добавления
     await state.update_data(sched_date=date_str)
     await state.set_state(AdminSlotStates.waiting_time)
 
@@ -1069,18 +957,22 @@ async def handle_admin_sched_date(message: Message, state: FSMContext):
     )
 
 
+# Catch-хендлер для нетекстовых сообщений на шаге даты
+@router.message(AdminSlotStates.waiting_date)
+async def handle_admin_sched_date_invalid(message: Message):
+    await message.answer(
+        "❌ Введите дату текстом в формате <code>ДД.ММ.ГГГГ</code>",
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(AdminSlotStates.waiting_time, F.data.startswith("admin_add_slot:"))
 async def handle_admin_add_slot(callback: CallbackQuery, state: FSMContext):
-    """
-    Добавляет один временной слот для выбранной даты.
-    Администратор нажимает кнопки по одной — каждое нажатие добавляет слот.
-    """
-    time_str = callback.data.split(":", 1)[1]  # "10:00"
+    time_str = callback.data.split(":", 1)[1]
 
     fsm_data = await state.get_data()
     date_str = fsm_data.get("sched_date")
 
-    # Проверяем: нет ли уже такого слота
     existing = await db.get_slot_by_date_time(date_str, time_str)
 
     if existing:
@@ -1097,7 +989,6 @@ async def handle_admin_add_slot(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(AdminSlotStates.waiting_time, F.data == "admin_sched:done")
 async def handle_admin_sched_done(callback: CallbackQuery, state: FSMContext):
-    """Завершает добавление слотов и возвращает в меню расписания."""
     await callback.answer("✅ Расписание сохранено!")
     await state.clear()
 
@@ -1109,7 +1000,6 @@ async def handle_admin_sched_done(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "admin_sched:view_day")
 async def handle_admin_sched_view_day(callback: CallbackQuery, state: FSMContext):
-    """Запрашивает дату для просмотра слотов конкретного дня."""
     await callback.answer()
     await state.set_state(AdminSlotStates.waiting_date)
     await state.update_data(filter_context="view_slots")
@@ -1127,11 +1017,9 @@ async def handle_admin_sched_view_day(callback: CallbackQuery, state: FSMContext
     )
 
 
+# ФИX #1: убран первый callback.answer()
 @router.callback_query(F.data.startswith("admin_del_slot:"))
 async def handle_admin_delete_slot(callback: CallbackQuery):
-    """Удаляет временной слот из расписания."""
-    await callback.answer()
-
     slot_id = callback.data.split(":", 1)[1]
     success = await db.delete_time_slot(slot_id)
 
@@ -1139,3 +1027,252 @@ async def handle_admin_delete_slot(callback: CallbackQuery):
         await callback.answer("🗑 Слот удалён", show_alert=True)
     else:
         await callback.answer("❌ Ошибка удаления", show_alert=True)
+
+
+# ===================================================
+# 8. СОЗДАНИЕ БРОНИРОВАНИЯ АДМИНИСТРАТОРОМ (новый флоу)
+# ===================================================
+
+@router.callback_query(F.data == "admin:create_booking")
+async def handle_admin_create_booking_start(callback: CallbackQuery, state: FSMContext):
+    """Запускает флоу ручного создания бронирования администратором."""
+    await callback.answer()
+
+    services = await db.get_all_services(active_only=True)
+
+    if not services:
+        await callback.answer("❌ Нет активных услуг. Сначала добавьте услуги.", show_alert=True)
+        return
+
+    await state.set_state(AdminBookingStates.waiting_service)
+
+    builder = InlineKeyboardBuilder()
+    for svc in services:
+        builder.button(
+            text=f"💅 {svc['name']} — {svc['price']} ₽",
+            callback_data=f"admin_cb_svc:{svc['id']}"
+        )
+    builder.button(text="❌ Отмена", callback_data="admin:main")
+    builder.adjust(1)
+
+    await callback.message.edit_text(
+        text="➕ <b>Создать бронирование</b>\n\nШаг 1/5: Выберите услугу:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminBookingStates.waiting_service, F.data.startswith("admin_cb_svc:"))
+async def handle_admin_create_booking_service(callback: CallbackQuery, state: FSMContext):
+    """Шаг 1: выбор услуги → ввод даты."""
+    await callback.answer()
+
+    service_id = callback.data.split(":", 1)[1]
+    service = await db.get_service_by_id(service_id)
+
+    if not service:
+        await callback.answer("Услуга не найдена", show_alert=True)
+        return
+
+    await state.update_data(
+        cb_service_id=service_id,
+        cb_service_name=service["name"],
+        cb_service_price=service["price"],
+        cb_service_duration=service["duration_min"],
+    )
+    await state.set_state(AdminBookingStates.waiting_date)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="admin:main")
+
+    await callback.message.edit_text(
+        text=(
+            f"✅ Услуга: <b>{service['name']}</b>\n\n"
+            "Шаг 2/5: Введите дату записи:\n"
+            "<i>Формат: ДД.ММ.ГГГГ (например, 25.03.2024)</i>"
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(AdminBookingStates.waiting_date, F.text)
+async def handle_admin_create_booking_date(message: Message, state: FSMContext):
+    """Шаг 2: ввод даты → выбор слота времени."""
+    parsed = parse_date(message.text.strip())
+
+    if not parsed:
+        await message.answer(
+            "❌ Некорректная дата или дата в прошлом.\n"
+            "Введите дату в формате <code>ДД.ММ.ГГГГ</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    year, month, day, date_obj = parsed
+    date_str = date_obj.strftime("%Y-%m-%d")
+
+    slots = await db.get_available_slots(date_str)
+
+    if not slots:
+        await message.answer(
+            f"😔 На {format_date_ru(date_str)} нет свободных слотов.\n"
+            "Введите другую дату или добавьте слоты в разделе 'Расписание'."
+        )
+        return
+
+    await state.update_data(cb_date=date_str)
+    await state.set_state(AdminBookingStates.waiting_time)
+
+    fsm_data = await state.get_data()
+    time_keyboard = build_time_slots_keyboard(slots)
+
+    await message.answer(
+        text=(
+            f"✅ Услуга: <b>{fsm_data['cb_service_name']}</b>\n"
+            f"✅ Дата: <b>{format_date_ru(date_str)}</b>\n\n"
+            "Шаг 3/5: Выберите время:"
+        ),
+        reply_markup=time_keyboard,
+        parse_mode="HTML",
+    )
+
+
+@router.message(AdminBookingStates.waiting_date)
+async def handle_admin_create_booking_date_invalid(message: Message):
+    await message.answer(
+        "❌ Введите дату текстом в формате <code>ДД.ММ.ГГГГ</code>",
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminBookingStates.waiting_time, F.data.startswith("slot:"))
+async def handle_admin_create_booking_time(callback: CallbackQuery, state: FSMContext):
+    """Шаг 3: выбор времени → ввод имени клиента."""
+    await callback.answer()
+
+    parts = callback.data.split(":")
+    slot_id = parts[1]
+    selected_time = f"{parts[2]}:{parts[3]}"
+
+    await state.update_data(cb_slot_id=slot_id, cb_time=selected_time)
+    await state.set_state(AdminBookingStates.waiting_name)
+
+    fsm_data = await state.get_data()
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="admin:main")
+
+    await callback.message.edit_text(
+        text=(
+            f"✅ Услуга: <b>{fsm_data['cb_service_name']}</b>\n"
+            f"✅ Дата: <b>{format_date_ru(fsm_data['cb_date'])}</b>\n"
+            f"✅ Время: <b>{selected_time}</b>\n\n"
+            "Шаг 4/5: Введите <b>имя клиента</b>:"
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(AdminBookingStates.waiting_name, F.text)
+async def handle_admin_create_booking_name(message: Message, state: FSMContext):
+    """Шаг 4: ввод имени → ввод телефона."""
+    name = message.text.strip()
+
+    if len(name) < 2:
+        await message.answer("❌ Имя слишком короткое. Введите минимум 2 символа.")
+        return
+
+    await state.update_data(cb_client_name=name)
+    await state.set_state(AdminBookingStates.waiting_phone)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="admin:main")
+
+    await message.answer(
+        text=(
+            f"✅ Имя клиента: <b>{name}</b>\n\n"
+            "Шаг 5/5: Введите <b>номер телефона</b> клиента:\n"
+            "<i>Например: +79161234567 или 89161234567</i>"
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(AdminBookingStates.waiting_name)
+async def handle_admin_create_booking_name_invalid(message: Message):
+    await message.answer("❌ Введите имя клиента текстом.")
+
+
+@router.message(AdminBookingStates.waiting_phone, F.text)
+async def handle_admin_create_booking_phone(message: Message, state: FSMContext):
+    """Шаг 5: ввод телефона → создание бронирования в БД."""
+    phone_text = message.text.strip()
+
+    if not is_valid_phone(phone_text):
+        await message.answer(
+            "❌ Некорректный номер телефона.\n"
+            "Введите в формате: <code>+79161234567</code> или <code>89161234567</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    phone = normalize_phone(phone_text)
+    fsm_data = await state.get_data()
+
+    booking = await db.create_booking(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        full_name=fsm_data["cb_client_name"],
+        phone=phone,
+        service_id=fsm_data["cb_service_id"],
+        slot_id=fsm_data["cb_slot_id"],
+        booking_date=fsm_data["cb_date"],
+        booking_time=fsm_data["cb_time"] + ":00",
+    )
+
+    if booking:
+        await state.clear()
+
+        builder = InlineKeyboardBuilder()
+        builder.button(text="📋 Посмотреть запись", callback_data=f"admin_bk_view:{booking['id']}")
+        builder.button(text="➕ Создать ещё", callback_data="admin:create_booking")
+        builder.button(text="◀ Главное меню", callback_data="admin:main")
+        builder.adjust(1)
+
+        await message.answer(
+            text=(
+                "✅ <b>Бронирование создано!</b>\n\n"
+                f"👤 Клиент: <b>{fsm_data['cb_client_name']}</b>\n"
+                f"📱 Телефон: <b>{phone}</b>\n"
+                f"💅 Услуга: <b>{fsm_data['cb_service_name']}</b>\n"
+                f"📅 Дата: <b>{format_date_ru(fsm_data['cb_date'])}</b>\n"
+                f"🕐 Время: <b>{fsm_data['cb_time']}</b>\n"
+                f"💰 Стоимость: <b>{fsm_data['cb_service_price']} ₽</b>"
+            ),
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
+    else:
+        # DB-ошибка: очищаем состояние, чтобы admin не застрял
+        await state.clear()
+        builder = InlineKeyboardBuilder()
+        builder.button(text="◀ Главное меню", callback_data="admin:main")
+        await message.answer(
+            "❌ <b>Ошибка при создании бронирования.</b>\n\n"
+            "Проверьте, что в <code>.env</code> указан ключ "
+            "<b>service_role</b> от Supabase (не anon).\n\n"
+            "Settings → API → service_role (secret)",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
+
+
+@router.message(AdminBookingStates.waiting_phone)
+async def handle_admin_create_booking_phone_invalid(message: Message):
+    await message.answer(
+        "❌ Введите номер телефона текстом, например: <code>+79161234567</code>",
+        parse_mode="HTML",
+    )
