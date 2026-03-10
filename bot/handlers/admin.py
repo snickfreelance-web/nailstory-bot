@@ -9,10 +9,10 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, TelegramObject
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from typing import Callable, Dict, Any, Awaitable, Optional
+from typing import Callable, Dict, Any, Awaitable, Optional, Set
 
 from bot.config import settings
-from bot.states import AdminServiceStates, AdminSlotStates, AdminRescheduleStates, AdminBookingStates
+from bot.states import AdminServiceStates, AdminSlotStates, AdminRescheduleStates, AdminBookingStates, AdminMgmtStates
 from bot.keyboards import (
     get_admin_main_keyboard,
     get_admin_services_keyboard,
@@ -25,6 +25,7 @@ from bot.keyboards import (
     get_admin_time_slots_keyboard,
     get_admin_slots_list_keyboard,
     get_delete_confirm_keyboard,
+    get_admin_admins_keyboard,
 )
 from bot.utils.validators import (
     format_date_ru,
@@ -41,6 +42,46 @@ from bot import database as db
 logger = logging.getLogger(__name__)
 
 BOOKINGS_PER_PAGE = 8
+
+
+# ===================================================
+# КЭШ АДМИНИСТРАТОРОВ
+# ===================================================
+# Хранит объединённый набор ID из .env и таблицы admins.
+# Сбрасывается после add_admin / remove_admin.
+
+_admin_cache: Optional[Set[int]] = None
+
+
+def _get_admin_ids() -> Set[int]:
+    """
+    Возвращает множество Telegram ID всех администраторов:
+    из .env (ADMIN_IDS) + из таблицы admins в БД.
+    При первом вызове и после инвалидации делает sync-запрос к БД.
+    """
+    global _admin_cache
+    if _admin_cache is not None:
+        return _admin_cache
+
+    env_ids: Set[int] = set(settings.get_admin_ids())
+    db_ids: Set[int] = set()
+
+    if db.supabase is not None:
+        try:
+            resp = db.supabase.table("admins").select("telegram_id").execute()
+            db_ids = {row["telegram_id"] for row in (resp.data or [])}
+        except Exception as e:
+            logger.warning(f"Не удалось загрузить администраторов из БД: {e}")
+
+    _admin_cache = env_ids | db_ids
+    logger.debug(f"Кэш администраторов обновлён: {_admin_cache}")
+    return _admin_cache
+
+
+def _invalidate_admin_cache():
+    """Сбрасывает кэш администраторов. Вызывать после add/remove admin."""
+    global _admin_cache
+    _admin_cache = None
 
 
 # ===================================================
@@ -61,17 +102,27 @@ class AdminMiddleware(BaseMiddleware):
         elif hasattr(event, "message") and event.message:
             user_id = event.message.from_user.id
 
-        admin_ids = settings.get_admin_ids()
+        if user_id in _get_admin_ids():
+            return await handler(event, data)
 
-        if user_id not in admin_ids:
-            if hasattr(event, "answer"):
-                await event.answer("⛔ У вас нет доступа к этой команде.")
-            elif hasattr(event, "message"):
-                await event.message.answer("⛔ У вас нет доступа.")
-                await event.answer()
-            return
-
-        return await handler(event, data)
+        # Не администратор — вежливая заглушка
+        stub = (
+            "🚫 Административная панель доступна только сотрудникам салона.\n\n"
+            "Для записи используйте /start 💅"
+        )
+        if hasattr(event, "answer") and callable(event.answer):
+            # CallbackQuery
+            try:
+                await event.answer("⛔ Нет доступа", show_alert=True)
+            except Exception:
+                pass
+        elif hasattr(event, "message") and event.message:
+            await event.message.answer(stub)
+            await event.answer()
+        elif hasattr(event, "answer"):
+            # Message
+            await event.answer(stub)
+        return
 
 
 router = Router()
@@ -1282,3 +1333,171 @@ async def handle_admin_create_booking_phone_invalid(message: Message):
         "❌ Введите номер телефона текстом, например: <code>+79161234567</code>",
         parse_mode="HTML",
     )
+
+
+# ===================================================
+# 9. УПРАВЛЕНИЕ АДМИНИСТРАТОРАМИ
+# ===================================================
+
+async def _show_admins_menu(target: Message, edit: bool = False) -> None:
+    """
+    Отображает экран управления администраторами.
+    Администраторы из .env показаны только в тексте (нельзя удалить через бот).
+    Администраторы из БД — показаны кнопками с возможностью удаления.
+    """
+    db_admins = await db.get_all_admins()
+    env_ids = settings.get_admin_ids()
+
+    lines = ["👥 <b>Администраторы NailStory</b>\n"]
+
+    if env_ids:
+        lines.append("🔒 <b>Из настроек сервера (.env):</b>")
+        for eid in env_ids:
+            lines.append(f"  • <code>{eid}</code>")
+        lines.append("")
+
+    if db_admins:
+        lines.append("👤 <b>Добавлены через бот:</b>")
+        for a in db_admins:
+            label = f"@{a['username']}" if a.get("username") else str(a["telegram_id"])
+            lines.append(f"  • {label} — <code>{a['telegram_id']}</code>")
+        lines.append("")
+
+    if not env_ids and not db_admins:
+        lines.append("Список пуст.")
+        lines.append("")
+
+    lines.append("Нажмите на администратора из БД чтобы удалить его:")
+
+    text = "\n".join(lines)
+    kb = get_admin_admins_keyboard(db_admins)
+
+    if edit:
+        await target.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await target.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:admins")
+async def handle_admin_admins(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await _show_admins_menu(callback.message, edit=True)
+
+
+@router.callback_query(F.data == "admin_mgmt:add")
+async def handle_admin_mgmt_add(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(AdminMgmtStates.waiting_new_admin_id)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="admin:admins")
+
+    await callback.message.edit_text(
+        text=(
+            "👥 <b>Добавление администратора</b>\n\n"
+            "Введите <b>Telegram ID</b> нового администратора.\n\n"
+            "Попросите кандидата узнать свой ID через бота "
+            "<a href='https://t.me/userinfobot'>@userinfobot</a>."
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+@router.message(AdminMgmtStates.waiting_new_admin_id, F.text)
+async def handle_admin_mgmt_id_input(message: Message, state: FSMContext):
+    raw = message.text.strip()
+
+    if not raw.lstrip("-").isdigit():
+        builder = InlineKeyboardBuilder()
+        builder.button(text="❌ Отмена", callback_data="admin:admins")
+        await message.answer(
+            "❌ Введите числовой Telegram ID, например: <code>123456789</code>",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
+        return
+
+    new_id = int(raw)
+
+    # Уже является администратором из .env
+    if new_id in settings.get_admin_ids():
+        builder = InlineKeyboardBuilder()
+        builder.button(text="◀ К администраторам", callback_data="admin:admins")
+        await state.clear()
+        await message.answer(
+            "ℹ️ Этот пользователь уже является администратором (задан в настройках сервера).",
+            reply_markup=builder.as_markup(),
+        )
+        return
+
+    ok = await db.add_admin(telegram_id=new_id)
+    await state.clear()
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="◀ К администраторам", callback_data="admin:admins")
+
+    if ok:
+        _invalidate_admin_cache()
+        await message.answer(
+            f"✅ Администратор <code>{new_id}</code> добавлен.",
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            "❌ Не удалось добавить администратора. Попробуйте ещё раз.",
+            reply_markup=builder.as_markup(),
+        )
+
+
+@router.message(AdminMgmtStates.waiting_new_admin_id)
+async def handle_admin_mgmt_id_input_invalid(message: Message):
+    await message.answer(
+        "❌ Введите числовой Telegram ID, например: <code>123456789</code>",
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("admin_mgmt:remove:"))
+async def handle_admin_mgmt_remove(callback: CallbackQuery):
+    await callback.answer()
+
+    telegram_id = int(callback.data.split(":")[-1])
+
+    # Нельзя удалить администратора из .env
+    if telegram_id in settings.get_admin_ids():
+        builder = InlineKeyboardBuilder()
+        builder.button(text="◀ Назад", callback_data="admin:admins")
+        await callback.message.edit_text(
+            "⛔ Этот администратор задан в настройках сервера и не может быть удалён через бот.",
+            reply_markup=builder.as_markup(),
+        )
+        return
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, удалить", callback_data=f"admin_mgmt:confirm_remove:{telegram_id}")
+    builder.button(text="❌ Отмена", callback_data="admin:admins")
+    builder.adjust(1)
+
+    await callback.message.edit_text(
+        text=f"⚠️ Удалить администратора <code>{telegram_id}</code> из БД?",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("admin_mgmt:confirm_remove:"))
+async def handle_admin_mgmt_confirm_remove(callback: CallbackQuery):
+    await callback.answer()
+
+    telegram_id = int(callback.data.split(":")[-1])
+    ok = await db.remove_admin(telegram_id)
+
+    if ok:
+        _invalidate_admin_cache()
+
+    # В любом случае показываем обновлённый список
+    await _show_admins_menu(callback.message, edit=True)

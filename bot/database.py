@@ -467,6 +467,67 @@ async def save_survey(
         return False
 
 
+# ===================================================
+# АДМИНИСТРАТОРЫ (ADMINS)
+# ===================================================
+
+async def get_admin_telegram_ids() -> List[int]:
+    """
+    Возвращает список Telegram ID всех администраторов из БД.
+    Используется для кэширования прав доступа в middleware.
+    """
+    try:
+        response = (
+            supabase.table("admins")
+            .select("telegram_id")
+            .execute()
+        )
+        return [row["telegram_id"] for row in (response.data or [])]
+    except Exception as e:
+        logger.error(f"Ошибка получения ID администраторов: {e}")
+        return []
+
+
+async def get_all_admins() -> List[Dict]:
+    """Возвращает всех администраторов из БД с полными данными."""
+    try:
+        response = (
+            supabase.table("admins")
+            .select("*")
+            .order("added_at")
+            .execute()
+        )
+        return response.data or []
+    except Exception as e:
+        logger.error(f"Ошибка получения администраторов: {e}")
+        return []
+
+
+async def add_admin(telegram_id: int, username: Optional[str] = None) -> bool:
+    """Добавляет администратора в БД. Если уже есть — обновляет username."""
+    try:
+        supabase.table("admins").upsert(
+            {"telegram_id": telegram_id, "username": username},
+            on_conflict="telegram_id",
+        ).execute()
+        logger.info(f"Администратор {telegram_id} добавлен в БД")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка добавления администратора {telegram_id}: {e}")
+        return False
+
+
+async def remove_admin(telegram_id: int) -> bool:
+    """Удаляет администратора из БД по Telegram ID."""
+    try:
+        supabase.table("admins").delete().eq("telegram_id", telegram_id).execute()
+        logger.info(f"Администратор {telegram_id} удалён из БД")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка удаления администратора {telegram_id}: {e}")
+        return False
+
+
 async def get_survey_by_booking_id(booking_id: str) -> Optional[Dict]:
     """
     Возвращает пожелания клиента по ID конкретного бронирования.
