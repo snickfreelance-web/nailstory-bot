@@ -26,6 +26,7 @@ from bot.keyboards import (
     get_admin_slots_list_keyboard,
     get_delete_confirm_keyboard,
     get_admin_admins_keyboard,
+    get_admin_transfer_keyboard,
 )
 from bot.utils.validators import (
     format_date_ru,
@@ -1339,18 +1340,42 @@ async def handle_admin_create_booking_phone_invalid(message: Message):
 # 9. УПРАВЛЕНИЕ АДМИНИСТРАТОРАМИ
 # ===================================================
 
-async def _show_admins_menu(target: Message, edit: bool = False) -> None:
-    """
-    Отображает экран управления администраторами.
-    Единый плоский список всех администраторов.
-    Формат: Имя (@username) / Имя (ID xxx) / @username / ID xxx
-    Кнопки удаления — только для администраторов из БД.
-    """
+
+async def _resolve_owner_id() -> Optional[int]:
+    # Возвращает актуальный Telegram ID владельца:
+    # 1. Сначала смотрит в БД (role='owner') — источник правды после передачи.
+    # 2. Если в БД нет — берёт из .env (OWNER_ID или первый ADMIN_IDS).
+    db_owner = await db.get_db_owner_id()
+    if db_owner:
+        return db_owner
+    return settings.get_owner_id()
+
+
+async def _show_admins_menu(
+    target: Message,
+    edit: bool = False,
+    viewer_id: Optional[int] = None,
+) -> None:
+    # Отображает экран управления администраторами.
+    # Список всех администраторов:
+    #   • Владелец: помечается 👑, кнопок управления нет
+    #   • Обычные admin из БД: кнопка 🗑 (только для viewer=owner)
+    #   • Env-admins (без записи в БД): отображаются только в тексте
+    # Управляющие кнопки видит только владелец.
     db_admins = await db.get_all_admins()
+    owner_id = await _resolve_owner_id()
     env_ids = settings.get_admin_ids()
 
-    # Строим единый список: env-администраторы первыми, затем из БД без дублей
+    # Bootstrap: если владелец ещё не в БД — добавляем автоматически
+    if owner_id and not any(a["telegram_id"] == owner_id for a in db_admins):
+        username = await db.get_username_by_user_id(owner_id)
+        await db.ensure_owner_in_db(owner_id, username)
+        _invalidate_admin_cache()
+        db_admins = await db.get_all_admins()
+
     db_admin_map = {a["telegram_id"]: a for a in db_admins}
+
+    # Строим единый список: env первыми, затем из БД без дублей
     all_ids = list(dict.fromkeys(env_ids + [a["telegram_id"] for a in db_admins]))
 
     lines = ["👥 <b>Администраторы NailStory</b>\n"]
@@ -1360,10 +1385,9 @@ async def _show_admins_menu(target: Message, edit: bool = False) -> None:
     else:
         for tid in all_ids:
             full_name, uname = await db.get_user_display_info(tid)
-            # Для DB-администраторов берём username из таблицы admins как запасной вариант
             if not uname and tid in db_admin_map:
                 uname = db_admin_map[tid].get("username")
-            # Имя (юзернейм) / Имя (ID) / @юзернейм / ID
+
             if full_name and uname:
                 label = f"{full_name} (@{uname})"
             elif full_name:
@@ -1372,13 +1396,18 @@ async def _show_admins_menu(target: Message, edit: bool = False) -> None:
                 label = f"@{uname}"
             else:
                 label = f"ID {tid}"
-            lines.append(f"  • {label}")
 
-    if db_admins:
-        lines.append("\nНажмите кнопку ниже чтобы удалить:")
+            if tid == owner_id:
+                lines.append(f"  👑 {label}")
+            else:
+                lines.append(f"  • {label}")
+
+    is_owner = (viewer_id is not None and viewer_id == owner_id)
+    if is_owner and len(db_admins) > 1:
+        lines.append("\nНажмите на администратора чтобы удалить:")
 
     text = "\n".join(lines)
-    kb = get_admin_admins_keyboard(db_admins)
+    kb = get_admin_admins_keyboard(db_admins, owner_id=owner_id, viewer_id=viewer_id)
 
     if edit:
         await target.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
@@ -1390,12 +1419,22 @@ async def _show_admins_menu(target: Message, edit: bool = False) -> None:
 async def handle_admin_admins(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
-    await _show_admins_menu(callback.message, edit=True)
+    await _show_admins_menu(callback.message, edit=True, viewer_id=callback.from_user.id)
 
+
+# -------------------------------------------------------
+# Добавление администратора (только владелец)
+# -------------------------------------------------------
 
 @router.callback_query(F.data == "admin_mgmt:add")
 async def handle_admin_mgmt_add(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+
+    owner_id = await _resolve_owner_id()
+    if callback.from_user.id != owner_id:
+        await callback.answer("⛔ Только владелец может добавлять администраторов", show_alert=True)
+        return
+
     await state.set_state(AdminMgmtStates.waiting_new_admin_id)
 
     builder = InlineKeyboardBuilder()
@@ -1407,7 +1446,7 @@ async def handle_admin_mgmt_add(callback: CallbackQuery, state: FSMContext):
             "Введите <b>@юзернейм</b> или <b>числовой Telegram ID</b> нового администратора.\n\n"
             "💡 <i>По юзернейму поиск работает, только если пользователь уже записывался через бот.\n"
             "Если не найден — попросите прислать Telegram ID "
-            "(можно узнать у бота @userinfobot).</i>"
+            "(можно узнать у бота @userinfobot) и введите число.</i>"
         ),
         reply_markup=builder.as_markup(),
         parse_mode="HTML",
@@ -1432,13 +1471,10 @@ async def handle_admin_mgmt_username_input(message: Message, state: FSMContext):
     user_id: Optional[int] = None
     username: Optional[str] = None
 
-    # Числовой Telegram ID — используем напрямую
     if clean.isdigit():
         user_id = int(clean)
-        # Пробуем получить username из bookings для красивого отображения
         username = await db.get_username_by_user_id(user_id)
     else:
-        # Юзернейм — ищем в таблице bookings
         username = clean
         user_id = await db.find_user_id_by_username(username)
 
@@ -1460,16 +1496,24 @@ async def handle_admin_mgmt_username_input(message: Message, state: FSMContext):
 
     display = f"@{username}" if username else f"ID {user_id}"
 
-    # Уже является администратором из .env
-    if user_id in settings.get_admin_ids():
+    owner_id = await _resolve_owner_id()
+    if user_id == owner_id:
         await message.answer(
-            f"ℹ️ {display} уже является администратором (задан в настройках сервера).",
+            f"ℹ️ {display} уже является владельцем.",
             reply_markup=builder.as_markup(),
         )
         return
 
-    # Добавляем (или обновляем username если изменился)
-    ok = await db.add_admin(telegram_id=user_id, username=username)
+    db_admins = await db.get_all_admins()
+    already = any(a["telegram_id"] == user_id for a in db_admins)
+    if already:
+        await message.answer(
+            f"ℹ️ {display} уже является администратором.",
+            reply_markup=builder.as_markup(),
+        )
+        return
+
+    ok = await db.add_admin(telegram_id=user_id, username=username, role="admin")
 
     if ok:
         _invalidate_admin_cache()
@@ -1492,21 +1536,30 @@ async def handle_admin_mgmt_username_input_invalid(message: Message):
     )
 
 
+# -------------------------------------------------------
+# Удаление администратора (только владелец)
+# -------------------------------------------------------
+
 @router.callback_query(F.data.startswith("admin_mgmt:remove:"))
 async def handle_admin_mgmt_remove(callback: CallbackQuery):
     await callback.answer()
 
+    owner_id = await _resolve_owner_id()
+    viewer_id = callback.from_user.id
+
+    if viewer_id != owner_id:
+        await callback.answer("⛔ Только владелец может удалять администраторов", show_alert=True)
+        return
+
     telegram_id = int(callback.data.split(":")[-1])
 
-    # Нельзя удалить администратора из .env
-    if telegram_id in settings.get_admin_ids():
-        builder = InlineKeyboardBuilder()
-        builder.button(text="◀ Назад", callback_data="admin:admins")
-        await callback.message.edit_text(
-            "⛔ Этот администратор задан в настройках сервера и не может быть удалён через бот.",
-            reply_markup=builder.as_markup(),
-        )
+    if telegram_id == owner_id:
+        await callback.answer("⛔ Владелец не может быть удалён", show_alert=True)
         return
+
+    db_admins = await db.get_all_admins()
+    admin_rec = next((a for a in db_admins if a["telegram_id"] == telegram_id), None)
+    display = f"@{admin_rec['username']}" if admin_rec and admin_rec.get("username") else f"ID {telegram_id}"
 
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Да, удалить", callback_data=f"admin_mgmt:confirm_remove:{telegram_id}")
@@ -1514,7 +1567,7 @@ async def handle_admin_mgmt_remove(callback: CallbackQuery):
     builder.adjust(1)
 
     await callback.message.edit_text(
-        text=f"⚠️ Удалить администратора <code>{telegram_id}</code> из БД?",
+        text=f"⚠️ Удалить администратора <b>{display}</b>?",
         reply_markup=builder.as_markup(),
         parse_mode="HTML",
     )
@@ -1524,11 +1577,118 @@ async def handle_admin_mgmt_remove(callback: CallbackQuery):
 async def handle_admin_mgmt_confirm_remove(callback: CallbackQuery):
     await callback.answer()
 
-    telegram_id = int(callback.data.split(":")[-1])
-    ok = await db.remove_admin(telegram_id)
+    owner_id = await _resolve_owner_id()
 
+    if callback.from_user.id != owner_id:
+        await callback.answer("⛔ Только владелец может удалять администраторов", show_alert=True)
+        return
+
+    telegram_id = int(callback.data.split(":")[-1])
+
+    if telegram_id == owner_id:
+        await callback.answer("⛔ Владелец не может быть удалён", show_alert=True)
+        return
+
+    ok = await db.remove_admin(telegram_id)
     if ok:
         _invalidate_admin_cache()
 
-    # В любом случае показываем обновлённый список
-    await _show_admins_menu(callback.message, edit=True)
+    await _show_admins_menu(callback.message, edit=True, viewer_id=callback.from_user.id)
+
+
+# -------------------------------------------------------
+# Передача владения (только владелец)
+# -------------------------------------------------------
+
+@router.callback_query(F.data == "admin_mgmt:transfer")
+async def handle_admin_mgmt_transfer(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+
+    owner_id = await _resolve_owner_id()
+    if callback.from_user.id != owner_id:
+        await callback.answer("⛔ Только владелец может передать владение", show_alert=True)
+        return
+
+    db_admins = await db.get_all_admins()
+    candidates = [a for a in db_admins if a["telegram_id"] != owner_id]
+
+    if not candidates:
+        await callback.answer("Нет администраторов для передачи владения", show_alert=True)
+        return
+
+    await state.set_state(AdminMgmtStates.waiting_transfer_target)
+
+    await callback.message.edit_text(
+        text=(
+            "🔄 <b>Передача владения</b>\n\n"
+            "Выберите администратора, которому хотите передать статус владельца.\n\n"
+            "⚠️ <i>После передачи вы станете обычным администратором.\n"
+            "Отменить это действие сможет только новый владелец.</i>"
+        ),
+        reply_markup=get_admin_transfer_keyboard(db_admins, owner_id=owner_id),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(
+    AdminMgmtStates.waiting_transfer_target,
+    F.data.startswith("admin_mgmt:transfer_to:"),
+)
+async def handle_admin_mgmt_transfer_confirm_prompt(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+
+    new_owner_id = int(callback.data.split(":")[-1])
+    await state.update_data(new_owner_id=new_owner_id)
+
+    db_admins = await db.get_all_admins()
+    admin_rec = next((a for a in db_admins if a["telegram_id"] == new_owner_id), None)
+    display = f"@{admin_rec['username']}" if admin_rec and admin_rec.get("username") else f"ID {new_owner_id}"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, передать", callback_data=f"admin_mgmt:confirm_transfer:{new_owner_id}")
+    builder.button(text="❌ Отмена", callback_data="admin:admins")
+    builder.adjust(1)
+
+    await callback.message.edit_text(
+        text=(
+            f"🔄 Передать владение пользователю <b>{display}</b>?\n\n"
+            "После подтверждения вы станете обычным администратором."
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("admin_mgmt:confirm_transfer:"))
+async def handle_admin_mgmt_confirm_transfer(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+
+    old_owner_id = callback.from_user.id
+    new_owner_id = int(callback.data.split(":")[-1])
+
+    current_owner = await _resolve_owner_id()
+    if old_owner_id != current_owner:
+        await callback.answer("⛔ Только владелец может передать владение", show_alert=True)
+        return
+
+    ok = await db.transfer_ownership(old_owner_id=old_owner_id, new_owner_id=new_owner_id)
+    _invalidate_admin_cache()
+
+    builder = InlineKeyboardBuilder()
+    if ok:
+        db_admins = await db.get_all_admins()
+        admin_rec = next((a for a in db_admins if a["telegram_id"] == new_owner_id), None)
+        display = f"@{admin_rec['username']}" if admin_rec and admin_rec.get("username") else f"ID {new_owner_id}"
+
+        builder.button(text="◀ К администраторам", callback_data="admin:admins")
+        await callback.message.edit_text(
+            f"✅ Владение передано {display}.\nВы теперь обычный администратор.",
+            reply_markup=builder.as_markup(),
+        )
+    else:
+        builder.button(text="◀ Назад", callback_data="admin:admins")
+        await callback.message.edit_text(
+            "❌ Не удалось передать владение. Попробуйте ещё раз.",
+            reply_markup=builder.as_markup(),
+        )

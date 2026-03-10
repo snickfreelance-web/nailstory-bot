@@ -203,33 +203,80 @@ def get_admin_main_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_admin_admins_keyboard(db_admins: List[Dict]) -> InlineKeyboardMarkup:
+def get_admin_admins_keyboard(
+    db_admins: List[Dict],
+    owner_id: Optional[int],
+    viewer_id: Optional[int],
+) -> InlineKeyboardMarkup:
     """
-    Список администраторов из БД с кнопками удаления.
-    Администраторы из .env отображаются только в тексте (не управляются).
+    Клавиатура управления администраторами.
+
+    Args:
+        db_admins:  Список записей из таблицы admins (уже содержит role)
+        owner_id:   Telegram ID текущего владельца (или None)
+        viewer_id:  Telegram ID пользователя, просматривающего страницу
+
+    Логика отображения кнопок:
+        - Владелец (owner_id == viewer_id):
+            • Обычные администраторы: кнопка [🗑 @username] — удалить
+            • Если есть хотя бы один обычный администратор: кнопка [🔄 Передать владение]
+            • Кнопка [➕ Добавить администратора]
+        - Обычный администратор:
+            • Кнопки управления не показываются (только просмотр)
+        - Всегда: [◀ Главное меню]
+    """
+    builder = InlineKeyboardBuilder()
+    viewer_is_owner = (owner_id is not None and viewer_id == owner_id)
+
+    if viewer_is_owner:
+        # Кнопки удаления для каждого обычного администратора
+        regular_admins = [a for a in db_admins if a["telegram_id"] != owner_id]
+        for admin in regular_admins:
+            t_id = admin["telegram_id"]
+            label = f"@{admin['username']}" if admin.get("username") else str(t_id)
+            builder.button(
+                text=f"🗑 {label}",
+                callback_data=f"admin_mgmt:remove:{t_id}",
+            )
+
+        # Передача владения — только если есть кому передавать
+        if regular_admins:
+            builder.button(
+                text="🔄 Передать владение",
+                callback_data="admin_mgmt:transfer",
+            )
+
+        builder.button(text="➕ Добавить администратора", callback_data="admin_mgmt:add")
+
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_admin_transfer_keyboard(
+    db_admins: List[Dict],
+    owner_id: Optional[int],
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора нового владельца при передаче владения.
+    Показывает всех обычных администраторов из БД (кроме текущего владельца).
 
     Args:
         db_admins: Список записей из таблицы admins
-
-    Пример:
-        [🗑 @manager]
-        [🗑 @assistant]
-        [➕ Добавить администратора]
-        [◀ Главное меню]
+        owner_id:  Текущий владелец (его исключаем из списка)
     """
     builder = InlineKeyboardBuilder()
 
-    for admin in db_admins:
+    candidates = [a for a in db_admins if a["telegram_id"] != owner_id]
+    for admin in candidates:
         t_id = admin["telegram_id"]
         label = f"@{admin['username']}" if admin.get("username") else str(t_id)
         builder.button(
-            text=f"🗑 {label}",
-            callback_data=f"admin_mgmt:remove:{t_id}",
+            text=f"👤 {label}",
+            callback_data=f"admin_mgmt:transfer_to:{t_id}",
         )
 
-    builder.button(text="➕ Добавить администратора", callback_data="admin_mgmt:add")
-    builder.button(text="◀ Главное меню", callback_data="admin:main")
-
+    builder.button(text="❌ Отмена", callback_data="admin:admins")
     builder.adjust(1)
     return builder.as_markup()
 
