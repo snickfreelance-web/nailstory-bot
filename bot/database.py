@@ -467,6 +467,138 @@ async def save_survey(
         return False
 
 
+# ===================================================
+# АДМИНИСТРАТОРЫ (ADMINS)
+# ===================================================
+
+async def get_admin_telegram_ids() -> List[int]:
+    """
+    Возвращает список Telegram ID всех администраторов из БД.
+    Используется для кэширования прав доступа в middleware.
+    """
+    try:
+        response = (
+            supabase.table("admins")
+            .select("telegram_id")
+            .execute()
+        )
+        return [row["telegram_id"] for row in (response.data or [])]
+    except Exception as e:
+        logger.error(f"Ошибка получения ID администраторов: {e}")
+        return []
+
+
+async def get_all_admins() -> List[Dict]:
+    """Возвращает всех администраторов из БД с полными данными."""
+    try:
+        response = (
+            supabase.table("admins")
+            .select("*")
+            .order("added_at")
+            .execute()
+        )
+        return response.data or []
+    except Exception as e:
+        logger.error(f"Ошибка получения администраторов: {e}")
+        return []
+
+
+async def add_admin(telegram_id: int, username: Optional[str] = None) -> bool:
+    """Добавляет администратора в БД. Если уже есть — обновляет username."""
+    try:
+        supabase.table("admins").upsert(
+            {"telegram_id": telegram_id, "username": username},
+            on_conflict="telegram_id",
+        ).execute()
+        logger.info(f"Администратор {telegram_id} добавлен в БД")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка добавления администратора {telegram_id}: {e}")
+        return False
+
+
+async def remove_admin(telegram_id: int) -> bool:
+    """Удаляет администратора из БД по Telegram ID."""
+    try:
+        supabase.table("admins").delete().eq("telegram_id", telegram_id).execute()
+        logger.info(f"Администратор {telegram_id} удалён из БД")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка удаления администратора {telegram_id}: {e}")
+        return False
+
+
+async def find_user_id_by_username(username: str) -> Optional[int]:
+    """
+    Ищет Telegram ID пользователя по его username в таблице bookings.
+    username передаётся без символа @, поиск без учёта регистра.
+    Возвращает user_id последней записи клиента, или None если не найден.
+    """
+    try:
+        clean = username.lstrip("@").lower()
+        response = (
+            supabase.table("bookings")
+            .select("user_id")
+            .ilike("username", clean)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if response.data:
+            return response.data[0]["user_id"]
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка поиска user_id по username @{username}: {e}")
+        return None
+
+
+async def get_username_by_user_id(user_id: int) -> Optional[str]:
+    """
+    Ищет username пользователя по его Telegram ID в таблице bookings.
+    Возвращает username из последней записи, или None если не найден
+    или если у пользователя нет username.
+    """
+    try:
+        response = (
+            supabase.table("bookings")
+            .select("username")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if response.data and response.data[0].get("username"):
+            return response.data[0]["username"]
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка поиска username по user_id {user_id}: {e}")
+        return None
+
+
+async def get_user_display_info(user_id: int) -> tuple:
+    """
+    Возвращает (full_name, username) из последнего бронирования пользователя.
+    Используется для красивого отображения в списке администраторов.
+    Оба значения могут быть None если пользователь не делал записей через бот.
+    """
+    try:
+        response = (
+            supabase.table("bookings")
+            .select("full_name, username")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if response.data:
+            row = response.data[0]
+            return row.get("full_name"), row.get("username")
+        return None, None
+    except Exception as e:
+        logger.error(f"Ошибка получения данных пользователя {user_id}: {e}")
+        return None, None
+
+
 async def get_survey_by_booking_id(booking_id: str) -> Optional[Dict]:
     """
     Возвращает пожелания клиента по ID конкретного бронирования.

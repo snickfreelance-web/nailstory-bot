@@ -181,10 +181,12 @@ def get_admin_main_keyboard() -> InlineKeyboardMarkup:
     Доступно по команде /admin.
 
     Кнопки:
-        📋 Все бронирования  — список записей с фильтрами
-        💅 Управление услугами — добавить/удалить/скрыть
-        📅 Расписание        — управление слотами
-        📊 Статистика        — сводка по записям
+        📋 Бронирования       — список записей с фильтрами
+        💅 Услуги             — добавить/удалить/скрыть
+        📅 Расписание         — управление слотами
+        📊 Статистика         — сводка по записям
+        ➕ Создать запись     — ручное создание бронирования
+        👥 Администраторы     — добавить/удалить администраторов
     """
     builder = InlineKeyboardBuilder()
 
@@ -193,10 +195,42 @@ def get_admin_main_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="📅 Расписание", callback_data="admin:schedule")
     builder.button(text="📊 Статистика", callback_data="admin:stats")
     builder.button(text="➕ Создать запись", callback_data="admin:create_booking")
+    builder.button(text="👥 Администраторы", callback_data="admin:admins")
 
-    # Первые 4 кнопки по 2 в ряд, последняя отдельно
-    builder.adjust(2, 2, 1)
+    # 2 + 2 + 1 + 1
+    builder.adjust(2, 2, 1, 1)
 
+    return builder.as_markup()
+
+
+def get_admin_admins_keyboard(db_admins: List[Dict]) -> InlineKeyboardMarkup:
+    """
+    Список администраторов из БД с кнопками удаления.
+    Администраторы из .env отображаются только в тексте (не управляются).
+
+    Args:
+        db_admins: Список записей из таблицы admins
+
+    Пример:
+        [🗑 @manager]
+        [🗑 @assistant]
+        [➕ Добавить администратора]
+        [◀ Главное меню]
+    """
+    builder = InlineKeyboardBuilder()
+
+    for admin in db_admins:
+        t_id = admin["telegram_id"]
+        label = f"@{admin['username']}" if admin.get("username") else str(t_id)
+        builder.button(
+            text=f"🗑 {label}",
+            callback_data=f"admin_mgmt:remove:{t_id}",
+        )
+
+    builder.button(text="➕ Добавить администратора", callback_data="admin_mgmt:add")
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
+
+    builder.adjust(1)
     return builder.as_markup()
 
 

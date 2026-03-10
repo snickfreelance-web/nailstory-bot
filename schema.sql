@@ -108,3 +108,22 @@ CREATE TABLE client_surveys (
 
 ALTER TABLE client_surveys DISABLE ROW LEVEL SECURITY;
 GRANT ALL ON client_surveys TO anon, authenticated, service_role;
+
+
+-- ===================================================
+-- 7. АДМИНИСТРАТОРЫ (ADMINS)
+-- ===================================================
+-- Администраторы, добавленные через бот (в дополнение к ADMIN_IDS из .env).
+-- telegram_id UNIQUE — один аккаунт не может быть добавлен дважды.
+
+DROP TABLE IF EXISTS admins CASCADE;
+
+CREATE TABLE admins (
+    id          UUID        DEFAULT uuid_generate_v4() PRIMARY KEY,
+    telegram_id BIGINT      NOT NULL UNIQUE,
+    username    TEXT,        -- @username для отображения, может быть NULL
+    added_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE admins DISABLE ROW LEVEL SECURITY;
+GRANT ALL ON admins TO anon, authenticated, service_role;
