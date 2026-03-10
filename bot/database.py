@@ -482,3 +482,22 @@ async def save_survey(
     except Exception as e:
         logger.error(f"Ошибка сохранения анкеты user_id={user_id}: {e}")
         return False
+
+
+async def get_survey_by_user_id(user_id: int) -> Optional[Dict]:
+    """
+    Возвращает анкету клиента по user_id.
+    Используется в админке для отображения пожеланий в карточке бронирования.
+    """
+    try:
+        response = (
+            supabase.table("client_surveys")
+            .select("comfort_prefs")
+            .eq("user_id", user_id)
+            .single()
+            .execute()
+        )
+        return response.data
+    except Exception as e:
+        # single() бросает исключение если строк нет — это нормально
+        return None

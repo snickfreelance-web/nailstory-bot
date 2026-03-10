@@ -9,7 +9,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, TelegramObject
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from typing import Callable, Dict, Any, Awaitable
+from typing import Callable, Dict, Any, Awaitable, Optional
 
 from bot.config import settings
 from bot.states import AdminServiceStates, AdminSlotStates, AdminRescheduleStates, AdminBookingStates
@@ -83,12 +83,14 @@ router.callback_query.middleware(AdminMiddleware())
 # ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: ФОРМАТИРОВАНИЕ БРОНИРОВАНИЯ
 # ===================================================
 
-def format_booking_card(booking: Dict) -> str:
+def format_booking_card(booking: Dict, comfort_prefs: Optional[str] = None) -> str:
     service_name = booking.get("services", {}).get("name", "Неизвестно")
     service_price = booking.get("services", {}).get("price", "—")
     date_display = format_date_ru(booking["booking_date"])
     time_display = format_time_ru(booking["booking_time"])
     status_display = format_status_ru(booking["status"])
+
+    comfort_line = f"\n☕ Пожелания: {comfort_prefs}" if comfort_prefs else ""
 
     return (
         f"👤 <b>{booking['full_name']}</b>\n"
@@ -97,7 +99,18 @@ def format_booking_card(booking: Dict) -> str:
         f"💅 {service_name} — {service_price} ₽\n"
         f"📅 {date_display}, 🕐 {time_display}\n"
         f"Статус: {status_display}"
+        f"{comfort_line}"
     )
+
+
+async def _render_booking_detail(booking: Dict) -> str:
+    """
+    Формирует полный текст карточки бронирования.
+    Подтягивает анкету клиента (пожелания об уюте) из client_surveys.
+    """
+    survey = await db.get_survey_by_user_id(booking["user_id"])
+    comfort = survey.get("comfort_prefs") if survey else None
+    return "📋 <b>Детали бронирования</b>\n\n" + format_booking_card(booking, comfort_prefs=comfort)
 
 
 # ===================================================
@@ -588,13 +601,8 @@ async def handle_admin_booking_view(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Бронирование не найдено", show_alert=True)
         return
 
-    text = (
-        "📋 <b>Детали бронирования</b>\n\n"
-        + format_booking_card(booking)
-    )
-
     await callback.message.edit_text(
-        text=text,
+        text=await _render_booking_detail(booking),
         reply_markup=get_admin_booking_actions_keyboard(booking_id, booking["status"]),
         parse_mode="HTML",
     )
@@ -612,7 +620,7 @@ async def handle_admin_booking_confirm(callback: CallbackQuery):
         booking = await db.get_booking_by_id(booking_id)
         if booking:
             await callback.message.edit_text(
-                text="📋 <b>Детали бронирования</b>\n\n" + format_booking_card(booking),
+                text=await _render_booking_detail(booking),
                 reply_markup=get_admin_booking_actions_keyboard(booking_id, booking["status"]),
                 parse_mode="HTML",
             )
@@ -639,7 +647,7 @@ async def handle_admin_booking_cancel(callback: CallbackQuery):
         booking = await db.get_booking_by_id(booking_id)
         if booking:
             await callback.message.edit_text(
-                text="📋 <b>Детали бронирования</b>\n\n" + format_booking_card(booking),
+                text=await _render_booking_detail(booking),
                 reply_markup=get_admin_booking_actions_keyboard(booking_id, booking["status"]),
                 parse_mode="HTML",
             )
@@ -672,7 +680,7 @@ async def handle_admin_booking_restore(callback: CallbackQuery):
         booking = await db.get_booking_by_id(booking_id)
         if booking:
             await callback.message.edit_text(
-                text="📋 <b>Детали бронирования</b>\n\n" + format_booking_card(booking),
+                text=await _render_booking_detail(booking),
                 reply_markup=get_admin_booking_actions_keyboard(booking_id, booking["status"]),
                 parse_mode="HTML",
             )
