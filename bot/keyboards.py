@@ -547,43 +547,30 @@ def get_admin_slots_list_keyboard(slots: List[Dict]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_survey_allergies_keyboard() -> InlineKeyboardMarkup:
+COMFORT_OPTIONS = {
+    "coffee":  "☕ Кофе",
+    "tea":     "🍵 Чай",
+    "sweets":  "🍬 Сладости",
+    "blanket": "🧣 Плед",
+}
+
+
+def get_survey_comfort_keyboard(selected: list = None) -> InlineKeyboardMarkup:
     """
-    Вопрос 1 анкеты: аллергии на материалы.
-    Кнопка «Пропустить» — ответ не обязателен.
+    Мультивыбор: что подготовить к визиту клиента.
+    Уже выбранные пункты отмечены ✅.
+    Кнопка «Готово» сохраняет выбор и завершает опрос.
     """
+    selected = selected or []
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Нет аллергий",           callback_data="survey_allergy:none")
-    builder.button(text="⚠️ Есть (уточню мастеру)", callback_data="survey_allergy:yes")
-    builder.button(text="⏭ Пропустить",              callback_data="survey_allergy:skip")
-    builder.adjust(1)
-    return builder.as_markup()
 
+    for key, label in COMFORT_OPTIONS.items():
+        prefix = "✅ " if key in selected else ""
+        builder.button(text=f"{prefix}{label}", callback_data=f"survey_comfort:{key}")
 
-def get_survey_nail_shape_keyboard() -> InlineKeyboardMarkup:
-    """
-    Вопрос 2 анкеты: предпочтения по форме ногтей.
-    """
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔵 Овал",    callback_data="survey_shape:oval")
-    builder.button(text="⬜ Квадрат", callback_data="survey_shape:square")
-    builder.button(text="🌸 Миндаль", callback_data="survey_shape:almond")
-    builder.button(text="💎 Стилет",  callback_data="survey_shape:stiletto")
-    builder.button(text="⏭ Пропустить", callback_data="survey_shape:skip")
-    builder.adjust(2, 2, 1)
-    return builder.as_markup()
+    builder.button(text="➡️ Готово", callback_data="survey_comfort:done")
 
-
-def get_survey_design_style_keyboard() -> InlineKeyboardMarkup:
-    """
-    Вопрос 3 анкеты: предпочтения по стилю дизайна.
-    """
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🤍 Минимализм",    callback_data="survey_style:minimal")
-    builder.button(text="🌈 Яркий/цветной", callback_data="survey_style:bright")
-    builder.button(text="🤍 Френч",         callback_data="survey_style:french")
-    builder.button(text="🔷 Геометрия",     callback_data="survey_style:geo")
-    builder.button(text="⏭ Пропустить",     callback_data="survey_style:skip")
+    # 4 опции по 2 в ряд, кнопка готово отдельно
     builder.adjust(2, 2, 1)
     return builder.as_markup()
 

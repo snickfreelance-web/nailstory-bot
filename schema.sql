@@ -99,13 +99,11 @@ GRANT ALL ON bookings   TO anon, authenticated, service_role;
 DROP TABLE IF EXISTS client_surveys CASCADE;
 
 CREATE TABLE client_surveys (
-    id           UUID        DEFAULT uuid_generate_v4() PRIMARY KEY,
-    user_id      BIGINT      NOT NULL UNIQUE,
-    booking_id   UUID        REFERENCES bookings(id) ON DELETE SET NULL,
-    allergies    TEXT,
-    nail_shape   TEXT,
-    design_style TEXT,
-    created_at   TIMESTAMPTZ DEFAULT NOW()
+    id            UUID        DEFAULT uuid_generate_v4() PRIMARY KEY,
+    user_id       BIGINT      NOT NULL UNIQUE,
+    booking_id    UUID        REFERENCES bookings(id) ON DELETE SET NULL,
+    comfort_prefs TEXT,        -- через запятую: "Кофе, Плед" или NULL
+    created_at    TIMESTAMPTZ DEFAULT NOW()
 );
 
 ALTER TABLE client_surveys DISABLE ROW LEVEL SECURITY;

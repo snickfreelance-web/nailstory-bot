@@ -465,23 +465,19 @@ async def has_survey(user_id: int) -> bool:
 async def save_survey(
     user_id: int,
     booking_id: str,
-    allergies: Optional[str],
-    nail_shape: Optional[str],
-    design_style: Optional[str],
+    comfort_prefs: Optional[str],
 ) -> bool:
     """
-    Сохраняет ответы анкеты клиента.
-    None означает «Пропустить» — поле остаётся пустым.
+    Сохраняет пожелания клиента к визиту.
+    comfort_prefs — строка через запятую («Кофе, Плед») или None.
     """
     try:
         supabase.table("client_surveys").insert({
             "user_id": user_id,
             "booking_id": booking_id,
-            "allergies": allergies,
-            "nail_shape": nail_shape,
-            "design_style": design_style,
+            "comfort_prefs": comfort_prefs,
         }).execute()
-        logger.info(f"Анкета сохранена: user_id={user_id}")
+        logger.info(f"Анкета сохранена: user_id={user_id}, prefs={comfort_prefs}")
         return True
     except Exception as e:
         logger.error(f"Ошибка сохранения анкеты user_id={user_id}: {e}")

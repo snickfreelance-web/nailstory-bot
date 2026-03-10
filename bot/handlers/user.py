@@ -23,9 +23,7 @@ from bot.keyboards import (
     get_phone_keyboard,
     get_remove_keyboard,
     get_start_keyboard,
-    get_survey_allergies_keyboard,
-    get_survey_nail_shape_keyboard,
-    get_survey_design_style_keyboard,
+    get_survey_comfort_keyboard,
 )
 from bot.utils.calendar import (
     build_calendar,
@@ -410,20 +408,18 @@ async def _complete_booking(message: Message, state: FSMContext, phone: str):
             f"время={fsm_data['selected_time']}"
         )
 
-        # Опрос — только для тех, кто ещё не заполнял
+        # Вопрос об уюте — только для тех, кто ещё не отвечал
         if not await db.has_survey(user.id):
-            await state.set_state(SurveyStates.waiting_allergies)
-            await state.update_data(survey_booking_id=booking["id"])
+            await state.set_state(SurveyStates.waiting_comfort)
+            await state.update_data(survey_booking_id=booking["id"], comfort_selected=[])
             await message.answer(
-                "📋 <b>Небольшой опрос</b> (1 мин)\n\n"
-                "Это поможет мастеру подготовиться к вашему визиту.\n"
-                "Каждый вопрос можно пропустить.\n\n"
-                "<b>Есть ли у вас аллергия на материалы\n"
-                "(гель-лак, акрил, клей)?</b>",
-                reply_markup=get_survey_allergies_keyboard(),
+                "🌸 Хотим встретить вас с заботой!\n\n"
+                "Что приготовить к вашему визиту?\n"
+                "<i>Можно выбрать несколько вариантов</i>",
+                reply_markup=get_survey_comfort_keyboard(),
                 parse_mode="HTML",
             )
-            return  # Не сбрасываем FSM — ждём ответов опроса
+            return  # Не сбрасываем FSM — ждём ответа
 
     else:
         # Ошибка создания бронирования
@@ -489,93 +485,53 @@ async def handle_cancel_booking(callback: CallbackQuery, state: FSMContext):
 
 
 # ===================================================
-# ОПРОС НОВОГО КЛИЕНТА (SURVEY)
+# ВОПРОС ОБ УЮТЕ (SURVEY)
 # ===================================================
 
-def _survey_label(value: str | None, mapping: dict) -> str:
-    """Переводит код ответа в читаемый текст для сохранения."""
-    if value is None or value == "skip":
-        return None
-    return mapping.get(value, value)
+from bot.keyboards import COMFORT_OPTIONS
 
 
-ALLERGY_LABELS = {
-    "none": "Нет аллергий",
-    "yes":  "Есть аллергия (уточнит мастеру)",
-}
-SHAPE_LABELS = {
-    "oval":     "Овал",
-    "square":   "Квадрат",
-    "almond":   "Миндаль",
-    "stiletto": "Стилет",
-}
-STYLE_LABELS = {
-    "minimal": "Минимализм",
-    "bright":  "Яркий/цветной",
-    "french":  "Френч",
-    "geo":     "Геометрия",
-}
-
-
-@router.callback_query(SurveyStates.waiting_allergies, F.data.startswith("survey_allergy:"))
-async def handle_survey_allergies(callback: CallbackQuery, state: FSMContext):
-    """Вопрос 1 → сохраняем ответ, переходим к вопросу 2."""
+@router.callback_query(SurveyStates.waiting_comfort, F.data.startswith("survey_comfort:"))
+async def handle_survey_comfort(callback: CallbackQuery, state: FSMContext):
+    """
+    Мультивыбор: клиент кликает опции (toggle), затем нажимает «Готово».
+    Каждый клик обновляет клавиатуру — выбранное помечается ✅.
+    """
     await callback.answer()
-    answer = callback.data.split(":", 1)[1]
-    await state.update_data(survey_allergies=answer)
-    await state.set_state(SurveyStates.waiting_nail_shape)
-
-    await callback.message.edit_text(
-        "<b>Какую форму ногтей вы предпочитаете?</b>",
-        reply_markup=get_survey_nail_shape_keyboard(),
-        parse_mode="HTML",
-    )
-
-
-@router.callback_query(SurveyStates.waiting_nail_shape, F.data.startswith("survey_shape:"))
-async def handle_survey_nail_shape(callback: CallbackQuery, state: FSMContext):
-    """Вопрос 2 → сохраняем ответ, переходим к вопросу 3."""
-    await callback.answer()
-    answer = callback.data.split(":", 1)[1]
-    await state.update_data(survey_nail_shape=answer)
-    await state.set_state(SurveyStates.waiting_design_style)
-
-    await callback.message.edit_text(
-        "<b>Какой стиль дизайна вам ближе?</b>",
-        reply_markup=get_survey_design_style_keyboard(),
-        parse_mode="HTML",
-    )
-
-
-@router.callback_query(SurveyStates.waiting_design_style, F.data.startswith("survey_style:"))
-async def handle_survey_design_style(callback: CallbackQuery, state: FSMContext):
-    """Вопрос 3 → сохраняем анкету в БД, завершаем опрос."""
-    await callback.answer()
-    answer = callback.data.split(":", 1)[1]
+    option = callback.data.split(":", 1)[1]
     fsm_data = await state.get_data()
+    selected: list = list(fsm_data.get("comfort_selected", []))
 
-    allergies    = _survey_label(fsm_data.get("survey_allergies"), ALLERGY_LABELS)
-    nail_shape   = _survey_label(fsm_data.get("survey_nail_shape"), SHAPE_LABELS)
-    design_style = _survey_label(answer, STYLE_LABELS)
+    if option == "done":
+        # Сохраняем и завершаем
+        comfort_prefs = (
+            ", ".join(COMFORT_OPTIONS[k] for k in selected if k in COMFORT_OPTIONS)
+            or None
+        )
+        await db.save_survey(
+            user_id=callback.from_user.id,
+            booking_id=fsm_data.get("survey_booking_id", ""),
+            comfort_prefs=comfort_prefs,
+        )
+        await state.clear()
 
-    await db.save_survey(
-        user_id=callback.from_user.id,
-        booking_id=fsm_data.get("survey_booking_id", ""),
-        allergies=allergies,
-        nail_shape=nail_shape,
-        design_style=design_style,
-    )
+        thanks = "✅ Отлично, всё будет готово к вашему приходу! 🌸" if comfort_prefs \
+            else "✅ Хорошо, ждём вас! 💅"
+        await callback.message.edit_text(thanks)
+        await callback.message.answer(
+            "Чтобы записаться ещё раз, нажмите /start",
+            reply_markup=get_start_keyboard(),
+        )
 
-    await state.clear()
+    else:
+        # Toggle: добавить или убрать опцию
+        if option in selected:
+            selected.remove(option)
+        else:
+            selected.append(option)
+        await state.update_data(comfort_selected=selected)
 
-    await callback.message.edit_text(
-        "✅ <b>Спасибо!</b>\n\n"
-        "Мастер учтёт ваши предпочтения.\n"
-        "Ждём вас в NailStory! 💅🌸",
-        parse_mode="HTML",
-    )
-
-    await callback.message.answer(
-        "Чтобы записаться ещё раз, нажмите /start",
-        reply_markup=get_start_keyboard(),
-    )
+        # Обновляем клавиатуру с новым состоянием выбора
+        await callback.message.edit_reply_markup(
+            reply_markup=get_survey_comfort_keyboard(selected)
+        )
