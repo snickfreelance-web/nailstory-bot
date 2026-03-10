@@ -96,8 +96,7 @@ def format_booking_card(booking: Dict) -> str:
         f"{'@' + booking['username'] if booking.get('username') else ''}\n"
         f"💅 {service_name} — {service_price} ₽\n"
         f"📅 {date_display}, 🕐 {time_display}\n"
-        f"Статус: {status_display}\n"
-        f"🆔 <code>{booking['id'][:8]}...</code>"
+        f"Статус: {status_display}"
     )
 
 
@@ -229,8 +228,7 @@ async def handle_admin_service_action(callback: CallbackQuery, state: FSMContext
                 f"💅 <b>{service['name']}</b>\n\n"
                 f"💰 Цена: {service['price']} ₽\n"
                 f"⏱ Длительность: {service['duration_min']} мин\n"
-                f"Статус: {status_text}\n"
-                f"🆔 <code>{service['id']}</code>"
+                f"Статус: {status_text}"
             ),
             reply_markup=get_admin_service_detail_keyboard(service_id, service["is_active"]),
             parse_mode="HTML",
