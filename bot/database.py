@@ -437,3 +437,52 @@ async def get_upcoming_bookings_for_date(target_date: str) -> List[Dict]:
     except Exception as e:
         logger.error(f"Ошибка получения записей за {target_date}: {e}")
         return []
+
+
+# ===================================================
+# АНКЕТА НОВОГО КЛИЕНТА (CLIENT SURVEYS)
+# ===================================================
+
+async def has_survey(user_id: int) -> bool:
+    """
+    Проверяет, заполнял ли клиент анкету ранее.
+    Если да — опрос больше не показывается.
+    При ошибке БД возвращает True (не мешаем клиенту).
+    """
+    try:
+        response = (
+            supabase.table("client_surveys")
+            .select("id")
+            .eq("user_id", user_id)
+            .execute()
+        )
+        return bool(response.data)
+    except Exception as e:
+        logger.error(f"Ошибка проверки анкеты user_id={user_id}: {e}")
+        return True  # При ошибке не блокируем флоу
+
+
+async def save_survey(
+    user_id: int,
+    booking_id: str,
+    allergies: Optional[str],
+    nail_shape: Optional[str],
+    design_style: Optional[str],
+) -> bool:
+    """
+    Сохраняет ответы анкеты клиента.
+    None означает «Пропустить» — поле остаётся пустым.
+    """
+    try:
+        supabase.table("client_surveys").insert({
+            "user_id": user_id,
+            "booking_id": booking_id,
+            "allergies": allergies,
+            "nail_shape": nail_shape,
+            "design_style": design_style,
+        }).execute()
+        logger.info(f"Анкета сохранена: user_id={user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения анкеты user_id={user_id}: {e}")
+        return False

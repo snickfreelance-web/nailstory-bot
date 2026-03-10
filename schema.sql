@@ -88,3 +88,25 @@ ALTER TABLE bookings   DISABLE ROW LEVEL SECURITY;
 GRANT ALL ON services   TO anon, authenticated, service_role;
 GRANT ALL ON time_slots TO anon, authenticated, service_role;
 GRANT ALL ON bookings   TO anon, authenticated, service_role;
+
+
+-- ===================================================
+-- 6. АНКЕТА НОВОГО КЛИЕНТА
+-- ===================================================
+-- Заполняется один раз после первого бронирования.
+-- user_id UNIQUE — один опрос на клиента.
+
+DROP TABLE IF EXISTS client_surveys CASCADE;
+
+CREATE TABLE client_surveys (
+    id           UUID        DEFAULT uuid_generate_v4() PRIMARY KEY,
+    user_id      BIGINT      NOT NULL UNIQUE,
+    booking_id   UUID        REFERENCES bookings(id) ON DELETE SET NULL,
+    allergies    TEXT,
+    nail_shape   TEXT,
+    design_style TEXT,
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE client_surveys DISABLE ROW LEVEL SECURITY;
+GRANT ALL ON client_surveys TO anon, authenticated, service_role;

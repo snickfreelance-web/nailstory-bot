@@ -17,12 +17,15 @@ from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, Contact
 
-from bot.states import BookingStates
+from bot.states import BookingStates, SurveyStates
 from bot.keyboards import (
     get_services_keyboard,
     get_phone_keyboard,
     get_remove_keyboard,
     get_start_keyboard,
+    get_survey_allergies_keyboard,
+    get_survey_nail_shape_keyboard,
+    get_survey_design_style_keyboard,
 )
 from bot.utils.calendar import (
     build_calendar,
@@ -407,6 +410,21 @@ async def _complete_booking(message: Message, state: FSMContext, phone: str):
             f"время={fsm_data['selected_time']}"
         )
 
+        # Опрос — только для тех, кто ещё не заполнял
+        if not await db.has_survey(user.id):
+            await state.set_state(SurveyStates.waiting_allergies)
+            await state.update_data(survey_booking_id=booking["id"])
+            await message.answer(
+                "📋 <b>Небольшой опрос</b> (1 мин)\n\n"
+                "Это поможет мастеру подготовиться к вашему визиту.\n"
+                "Каждый вопрос можно пропустить.\n\n"
+                "<b>Есть ли у вас аллергия на материалы\n"
+                "(гель-лак, акрил, клей)?</b>",
+                reply_markup=get_survey_allergies_keyboard(),
+                parse_mode="HTML",
+            )
+            return  # Не сбрасываем FSM — ждём ответов опроса
+
     else:
         # Ошибка создания бронирования
         await message.answer(
@@ -416,7 +434,7 @@ async def _complete_booking(message: Message, state: FSMContext, phone: str):
             reply_markup=get_remove_keyboard(),
         )
 
-    # Сбрасываем FSM — диалог завершён
+    # Сбрасываем FSM — диалог завершён (или если опрос уже был пройден)
     await state.clear()
 
     # Показываем главное меню для новой записи
@@ -466,5 +484,98 @@ async def handle_cancel_booking(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text(
         text="❌ Запись отменена.\n\nВозвращайтесь когда будете готовы! 💅",
+        reply_markup=get_start_keyboard(),
+    )
+
+
+# ===================================================
+# ОПРОС НОВОГО КЛИЕНТА (SURVEY)
+# ===================================================
+
+def _survey_label(value: str | None, mapping: dict) -> str:
+    """Переводит код ответа в читаемый текст для сохранения."""
+    if value is None or value == "skip":
+        return None
+    return mapping.get(value, value)
+
+
+ALLERGY_LABELS = {
+    "none": "Нет аллергий",
+    "yes":  "Есть аллергия (уточнит мастеру)",
+}
+SHAPE_LABELS = {
+    "oval":     "Овал",
+    "square":   "Квадрат",
+    "almond":   "Миндаль",
+    "stiletto": "Стилет",
+}
+STYLE_LABELS = {
+    "minimal": "Минимализм",
+    "bright":  "Яркий/цветной",
+    "french":  "Френч",
+    "geo":     "Геометрия",
+}
+
+
+@router.callback_query(SurveyStates.waiting_allergies, F.data.startswith("survey_allergy:"))
+async def handle_survey_allergies(callback: CallbackQuery, state: FSMContext):
+    """Вопрос 1 → сохраняем ответ, переходим к вопросу 2."""
+    await callback.answer()
+    answer = callback.data.split(":", 1)[1]
+    await state.update_data(survey_allergies=answer)
+    await state.set_state(SurveyStates.waiting_nail_shape)
+
+    await callback.message.edit_text(
+        "<b>Какую форму ногтей вы предпочитаете?</b>",
+        reply_markup=get_survey_nail_shape_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(SurveyStates.waiting_nail_shape, F.data.startswith("survey_shape:"))
+async def handle_survey_nail_shape(callback: CallbackQuery, state: FSMContext):
+    """Вопрос 2 → сохраняем ответ, переходим к вопросу 3."""
+    await callback.answer()
+    answer = callback.data.split(":", 1)[1]
+    await state.update_data(survey_nail_shape=answer)
+    await state.set_state(SurveyStates.waiting_design_style)
+
+    await callback.message.edit_text(
+        "<b>Какой стиль дизайна вам ближе?</b>",
+        reply_markup=get_survey_design_style_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(SurveyStates.waiting_design_style, F.data.startswith("survey_style:"))
+async def handle_survey_design_style(callback: CallbackQuery, state: FSMContext):
+    """Вопрос 3 → сохраняем анкету в БД, завершаем опрос."""
+    await callback.answer()
+    answer = callback.data.split(":", 1)[1]
+    fsm_data = await state.get_data()
+
+    allergies    = _survey_label(fsm_data.get("survey_allergies"), ALLERGY_LABELS)
+    nail_shape   = _survey_label(fsm_data.get("survey_nail_shape"), SHAPE_LABELS)
+    design_style = _survey_label(answer, STYLE_LABELS)
+
+    await db.save_survey(
+        user_id=callback.from_user.id,
+        booking_id=fsm_data.get("survey_booking_id", ""),
+        allergies=allergies,
+        nail_shape=nail_shape,
+        design_style=design_style,
+    )
+
+    await state.clear()
+
+    await callback.message.edit_text(
+        "✅ <b>Спасибо!</b>\n\n"
+        "Мастер учтёт ваши предпочтения.\n"
+        "Ждём вас в NailStory! 💅🌸",
+        parse_mode="HTML",
+    )
+
+    await callback.message.answer(
+        "Чтобы записаться ещё раз, нажмите /start",
         reply_markup=get_start_keyboard(),
     )

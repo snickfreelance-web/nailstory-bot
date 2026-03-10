@@ -547,6 +547,47 @@ def get_admin_slots_list_keyboard(slots: List[Dict]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def get_survey_allergies_keyboard() -> InlineKeyboardMarkup:
+    """
+    Вопрос 1 анкеты: аллергии на материалы.
+    Кнопка «Пропустить» — ответ не обязателен.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Нет аллергий",           callback_data="survey_allergy:none")
+    builder.button(text="⚠️ Есть (уточню мастеру)", callback_data="survey_allergy:yes")
+    builder.button(text="⏭ Пропустить",              callback_data="survey_allergy:skip")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_survey_nail_shape_keyboard() -> InlineKeyboardMarkup:
+    """
+    Вопрос 2 анкеты: предпочтения по форме ногтей.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔵 Овал",    callback_data="survey_shape:oval")
+    builder.button(text="⬜ Квадрат", callback_data="survey_shape:square")
+    builder.button(text="🌸 Миндаль", callback_data="survey_shape:almond")
+    builder.button(text="💎 Стилет",  callback_data="survey_shape:stiletto")
+    builder.button(text="⏭ Пропустить", callback_data="survey_shape:skip")
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()
+
+
+def get_survey_design_style_keyboard() -> InlineKeyboardMarkup:
+    """
+    Вопрос 3 анкеты: предпочтения по стилю дизайна.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🤍 Минимализм",    callback_data="survey_style:minimal")
+    builder.button(text="🌈 Яркий/цветной", callback_data="survey_style:bright")
+    builder.button(text="🤍 Френч",         callback_data="survey_style:french")
+    builder.button(text="🔷 Геометрия",     callback_data="survey_style:geo")
+    builder.button(text="⏭ Пропустить",     callback_data="survey_style:skip")
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()
+
+
 def get_delete_confirm_keyboard(booking_id: str) -> InlineKeyboardMarkup:
     """
     Клавиатура подтверждения удаления бронирования.
