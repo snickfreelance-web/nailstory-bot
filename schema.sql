@@ -115,15 +115,33 @@ GRANT ALL ON client_surveys TO anon, authenticated, service_role;
 -- ===================================================
 -- Администраторы, добавленные через бот (в дополнение к ADMIN_IDS из .env).
 -- telegram_id UNIQUE — один аккаунт не может быть добавлен дважды.
+-- role: 'owner' (владелец, 1 штука) или 'admin' (обычный администратор).
+-- Владелец задаётся через OWNER_ID в .env при первом открытии раздела.
 
 DROP TABLE IF EXISTS admins CASCADE;
 
 CREATE TABLE admins (
     id          UUID        DEFAULT uuid_generate_v4() PRIMARY KEY,
     telegram_id BIGINT      NOT NULL UNIQUE,
-    username    TEXT,        -- @username для отображения, может быть NULL
+    username    TEXT,                                   -- @username для отображения, может быть NULL
+    role        TEXT        NOT NULL DEFAULT 'admin'
+                            CHECK (role IN ('owner', 'admin')),
     added_at    TIMESTAMPTZ DEFAULT NOW()
 );
 
 ALTER TABLE admins DISABLE ROW LEVEL SECURITY;
 GRANT ALL ON admins TO anon, authenticated, service_role;
+
+
+-- ===================================================
+-- МИГРАЦИЯ (если таблица admins уже существует)
+-- ===================================================
+-- Выполните ТОЛЬКО этот блок если таблица уже есть и не хотите терять данные:
+--
+--   ALTER TABLE admins ADD COLUMN IF NOT EXISTS
+--       role TEXT NOT NULL DEFAULT 'admin'
+--       CHECK (role IN ('owner', 'admin'));
+--
+-- Затем назначьте владельца (подставьте Telegram ID):
+--   UPDATE admins SET role = 'owner' WHERE telegram_id = 123456789;
+-- ===================================================

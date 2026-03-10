@@ -503,14 +503,34 @@ async def get_all_admins() -> List[Dict]:
         return []
 
 
-async def add_admin(telegram_id: int, username: Optional[str] = None) -> bool:
-    """Добавляет администратора в БД. Если уже есть — обновляет username."""
+async def add_admin(
+    telegram_id: int,
+    username: Optional[str] = None,
+    role: str = "admin",
+) -> bool:
+    """
+    Добавляет администратора в БД.
+    Если уже есть — обновляет username (роль не трогает, чтобы не перезаписать 'owner').
+    Для явной установки роли используйте set_admin_role().
+    """
     try:
-        supabase.table("admins").upsert(
-            {"telegram_id": telegram_id, "username": username},
-            on_conflict="telegram_id",
-        ).execute()
-        logger.info(f"Администратор {telegram_id} добавлен в БД")
+        # Проверяем, есть ли уже запись
+        existing = (
+            supabase.table("admins")
+            .select("role")
+            .eq("telegram_id", telegram_id)
+            .execute()
+        )
+        if existing.data:
+            # Обновляем только username, роль оставляем
+            supabase.table("admins").update(
+                {"username": username}
+            ).eq("telegram_id", telegram_id).execute()
+        else:
+            supabase.table("admins").insert(
+                {"telegram_id": telegram_id, "username": username, "role": role}
+            ).execute()
+        logger.info(f"Администратор {telegram_id} добавлен/обновлён в БД (role={role})")
         return True
     except Exception as e:
         logger.error(f"Ошибка добавления администратора {telegram_id}: {e}")
@@ -525,6 +545,84 @@ async def remove_admin(telegram_id: int) -> bool:
         return True
     except Exception as e:
         logger.error(f"Ошибка удаления администратора {telegram_id}: {e}")
+        return False
+
+
+async def get_db_owner_id() -> Optional[int]:
+    """
+    Возвращает Telegram ID владельца (role='owner') из таблицы admins.
+    Если в БД нет владельца — возвращает None.
+    """
+    try:
+        response = (
+            supabase.table("admins")
+            .select("telegram_id")
+            .eq("role", "owner")
+            .limit(1)
+            .execute()
+        )
+        if response.data:
+            return response.data[0]["telegram_id"]
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка получения владельца из БД: {e}")
+        return None
+
+
+async def set_admin_role(telegram_id: int, role: str) -> bool:
+    """
+    Устанавливает роль администратора ('owner' или 'admin').
+    Администратор должен уже существовать в таблице admins.
+    """
+    try:
+        supabase.table("admins").update({"role": role}).eq("telegram_id", telegram_id).execute()
+        logger.info(f"Роль администратора {telegram_id} изменена на {role}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка изменения роли {telegram_id}: {e}")
+        return False
+
+
+async def transfer_ownership(old_owner_id: int, new_owner_id: int) -> bool:
+    """
+    Передаёт владение: старый владелец становится обычным администратором,
+    новый — владельцем. Оба должны существовать в таблице admins.
+    Возвращает True при успехе обоих запросов.
+    """
+    try:
+        supabase.table("admins").update({"role": "admin"}).eq("telegram_id", old_owner_id).execute()
+        supabase.table("admins").update({"role": "owner"}).eq("telegram_id", new_owner_id).execute()
+        logger.info(f"Владение передано: {old_owner_id} → {new_owner_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка передачи владения {old_owner_id}→{new_owner_id}: {e}")
+        return False
+
+
+async def ensure_owner_in_db(owner_id: int, username: Optional[str] = None) -> bool:
+    """
+    Гарантирует, что владелец существует в таблице admins с role='owner'.
+    Вызывается при первом открытии раздела администраторов, если в БД нет owner.
+    Если запись уже есть — обновляет роль до 'owner'.
+    """
+    try:
+        existing = (
+            supabase.table("admins")
+            .select("telegram_id, role")
+            .eq("telegram_id", owner_id)
+            .execute()
+        )
+        if existing.data:
+            if existing.data[0]["role"] != "owner":
+                supabase.table("admins").update({"role": "owner"}).eq("telegram_id", owner_id).execute()
+        else:
+            supabase.table("admins").insert(
+                {"telegram_id": owner_id, "username": username, "role": "owner"}
+            ).execute()
+        logger.info(f"Владелец {owner_id} зарегистрирован в БД")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка регистрации владельца {owner_id}: {e}")
         return False
 
 
