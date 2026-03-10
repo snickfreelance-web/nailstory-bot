@@ -450,33 +450,33 @@ async def save_survey(
     comfort_prefs: Optional[str],
 ) -> bool:
     """
-    Сохраняет (или обновляет) пожелания клиента к визиту.
-    Upsert по user_id — каждый новый визит перезаписывает предыдущие предпочтения.
-    comfort_prefs — строка через запятую («Кофе, Плед») или None.
+    Сохраняет (или обновляет) пожелания клиента к конкретному визиту.
+    Upsert по booking_id — каждое бронирование хранит свои пожелания.
+    comfort_prefs — строка через запятую («☕ Кофе, 🧣 Плед») или None.
     """
     try:
         supabase.table("client_surveys").upsert({
             "user_id": user_id,
             "booking_id": booking_id,
             "comfort_prefs": comfort_prefs,
-        }, on_conflict="user_id").execute()
-        logger.info(f"Анкета сохранена/обновлена: user_id={user_id}, prefs={comfort_prefs}")
+        }, on_conflict="booking_id").execute()
+        logger.info(f"Пожелания сохранены: booking_id={booking_id}, prefs={comfort_prefs}")
         return True
     except Exception as e:
-        logger.error(f"Ошибка сохранения анкеты user_id={user_id}: {e}")
+        logger.error(f"Ошибка сохранения пожеланий booking_id={booking_id}: {e}")
         return False
 
 
-async def get_survey_by_user_id(user_id: int) -> Optional[Dict]:
+async def get_survey_by_booking_id(booking_id: str) -> Optional[Dict]:
     """
-    Возвращает анкету клиента по user_id.
-    Используется в админке для отображения пожеланий в карточке бронирования.
+    Возвращает пожелания клиента по ID конкретного бронирования.
+    Используется в админке для отображения в карточке бронирования.
     """
     try:
         response = (
             supabase.table("client_surveys")
             .select("comfort_prefs")
-            .eq("user_id", user_id)
+            .eq("booking_id", booking_id)
             .single()
             .execute()
         )

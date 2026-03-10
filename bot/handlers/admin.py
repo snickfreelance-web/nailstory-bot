@@ -106,9 +106,9 @@ def format_booking_card(booking: Dict, comfort_prefs: Optional[str] = None) -> s
 async def _render_booking_detail(booking: Dict) -> str:
     """
     Формирует полный текст карточки бронирования.
-    Подтягивает анкету клиента (пожелания об уюте) из client_surveys.
+    Подтягивает пожелания клиента из client_surveys по booking_id.
     """
-    survey = await db.get_survey_by_user_id(booking["user_id"])
+    survey = await db.get_survey_by_booking_id(booking["id"])
     comfort = survey.get("comfort_prefs") if survey else None
     return "📋 <b>Детали бронирования</b>\n\n" + format_booking_card(booking, comfort_prefs=comfort)
 

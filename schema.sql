@@ -91,17 +91,17 @@ GRANT ALL ON bookings   TO anon, authenticated, service_role;
 
 
 -- ===================================================
--- 6. АНКЕТА НОВОГО КЛИЕНТА
+-- 6. ПОЖЕЛАНИЯ К ВИЗИТУ (CLIENT SURVEYS)
 -- ===================================================
--- Заполняется один раз после первого бронирования.
--- user_id UNIQUE — один опрос на клиента.
+-- Своя запись на каждое бронирование.
+-- booking_id UNIQUE — одни пожелания на один визит.
 
 DROP TABLE IF EXISTS client_surveys CASCADE;
 
 CREATE TABLE client_surveys (
     id            UUID        DEFAULT uuid_generate_v4() PRIMARY KEY,
-    user_id       BIGINT      NOT NULL UNIQUE,
-    booking_id    UUID        REFERENCES bookings(id) ON DELETE SET NULL,
+    user_id       BIGINT      NOT NULL,
+    booking_id    UUID        NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE,
     comfort_prefs TEXT,        -- через запятую: "Кофе, Плед" или NULL
     created_at    TIMESTAMPTZ DEFAULT NOW()
 );
