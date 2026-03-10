@@ -4,7 +4,7 @@
 
 import logging
 from datetime import date
-from aiogram import Router, F, BaseMiddleware, Bot
+from aiogram import Router, F, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, TelegramObject
@@ -1353,7 +1353,10 @@ async def _show_admins_menu(target: Message, edit: bool = False) -> None:
     if env_ids:
         lines.append("🔒 <b>Из настроек сервера (.env):</b>")
         for eid in env_ids:
-            lines.append(f"  • <code>{eid}</code>")
+            # Пробуем найти username по user_id в таблице bookings
+            uname = await db.get_username_by_user_id(eid)
+            label = f"@{uname}" if uname else f"<code>{eid}</code>"
+            lines.append(f"  • {label}")
         lines.append("")
 
     if db_admins:
@@ -1393,9 +1396,10 @@ async def handle_admin_mgmt_add(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         text=(
             "👥 <b>Добавление администратора</b>\n\n"
-            "Введите <b>@юзернейм</b> нового администратора.\n\n"
-            "Пользователь должен хотя бы раз написать боту (/start), "
-            "чтобы система его нашла."
+            "Введите <b>@юзернейм</b> или <b>числовой Telegram ID</b> нового администратора.\n\n"
+            "💡 <i>По юзернейму поиск работает, только если пользователь уже записывался через бот.\n"
+            "Если не найден — попросите прислать Telegram ID "
+            "(можно узнать у бота @userinfobot).</i>"
         ),
         reply_markup=builder.as_markup(),
         parse_mode="HTML",
@@ -1403,61 +1407,66 @@ async def handle_admin_mgmt_add(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(AdminMgmtStates.waiting_new_admin_id, F.text)
-async def handle_admin_mgmt_username_input(message: Message, state: FSMContext, bot: Bot):
+async def handle_admin_mgmt_username_input(message: Message, state: FSMContext):
     raw = message.text.strip()
-    username = raw.lstrip("@")
+    clean = raw.lstrip("@").strip()
 
-    if not username:
+    if not clean:
         builder = InlineKeyboardBuilder()
         builder.button(text="❌ Отмена", callback_data="admin:admins")
         await message.answer(
-            "❌ Введите @юзернейм, например: <code>@manager</code>",
+            "❌ Введите @юзернейм или числовой Telegram ID",
             reply_markup=builder.as_markup(),
             parse_mode="HTML",
         )
         return
 
-    # Шаг 1: ищем в таблице bookings (клиенты, уже пользовавшиеся ботом)
-    user_id = await db.find_user_id_by_username(username)
+    user_id: Optional[int] = None
+    username: Optional[str] = None
 
-    # Шаг 2: пробуем Bot API — get_chat работает для публичных аккаунтов
-    # и пользователей, ранее взаимодействовавших с ботом
-    if user_id is None:
-        try:
-            chat = await bot.get_chat(f"@{username}")
-            user_id = chat.id
-        except Exception:
-            pass
+    # Числовой Telegram ID — используем напрямую
+    if clean.isdigit():
+        user_id = int(clean)
+        # Пробуем получить username из bookings для красивого отображения
+        username = await db.get_username_by_user_id(user_id)
+    else:
+        # Юзернейм — ищем в таблице bookings
+        username = clean
+        user_id = await db.find_user_id_by_username(username)
 
-    if user_id is None:
-        builder = InlineKeyboardBuilder()
-        builder.button(text="❌ Отмена", callback_data="admin:admins")
-        await message.answer(
-            f"❌ Пользователь @{username} не найден.\n\n"
-            "Попросите его отправить /start боту и попробуйте ещё раз.",
-            reply_markup=builder.as_markup(),
-        )
-        return
+        if user_id is None:
+            builder = InlineKeyboardBuilder()
+            builder.button(text="❌ Отмена", callback_data="admin:admins")
+            await message.answer(
+                f"❌ Пользователь @{username} не найден в системе.\n\n"
+                "Этот способ работает, только если пользователь уже записывался через бот.\n\n"
+                "Попросите его прислать Telegram ID "
+                "(можно узнать у бота @userinfobot) и введите число.",
+                reply_markup=builder.as_markup(),
+            )
+            return
 
     await state.clear()
     builder = InlineKeyboardBuilder()
     builder.button(text="◀ К администраторам", callback_data="admin:admins")
 
+    display = f"@{username}" if username else f"ID {user_id}"
+
     # Уже является администратором из .env
     if user_id in settings.get_admin_ids():
         await message.answer(
-            f"ℹ️ @{username} уже является администратором (задан в настройках сервера).",
+            f"ℹ️ {display} уже является администратором (задан в настройках сервера).",
             reply_markup=builder.as_markup(),
         )
         return
 
-    # Уже есть в БД — обновляем username на случай если изменился
+    # Добавляем (или обновляем username если изменился)
     ok = await db.add_admin(telegram_id=user_id, username=username)
 
     if ok:
         _invalidate_admin_cache()
         await message.answer(
-            f"✅ Администратор @{username} добавлен.",
+            f"✅ Администратор {display} добавлен.",
             reply_markup=builder.as_markup(),
         )
     else:

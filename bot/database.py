@@ -552,6 +552,29 @@ async def find_user_id_by_username(username: str) -> Optional[int]:
         return None
 
 
+async def get_username_by_user_id(user_id: int) -> Optional[str]:
+    """
+    Ищет username пользователя по его Telegram ID в таблице bookings.
+    Возвращает username из последней записи, или None если не найден
+    или если у пользователя нет username.
+    """
+    try:
+        response = (
+            supabase.table("bookings")
+            .select("username")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if response.data and response.data[0].get("username"):
+            return response.data[0]["username"]
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка поиска username по user_id {user_id}: {e}")
+        return None
+
+
 async def get_survey_by_booking_id(booking_id: str) -> Optional[Dict]:
     """
     Возвращает пожелания клиента по ID конкретного бронирования.
