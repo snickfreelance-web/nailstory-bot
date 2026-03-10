@@ -437,3 +437,50 @@ async def get_upcoming_bookings_for_date(target_date: str) -> List[Dict]:
     except Exception as e:
         logger.error(f"Ошибка получения записей за {target_date}: {e}")
         return []
+
+
+# ===================================================
+# АНКЕТА НОВОГО КЛИЕНТА (CLIENT SURVEYS)
+# ===================================================
+
+
+async def save_survey(
+    user_id: int,
+    booking_id: str,
+    comfort_prefs: Optional[str],
+) -> bool:
+    """
+    Сохраняет (или обновляет) пожелания клиента к конкретному визиту.
+    Upsert по booking_id — каждое бронирование хранит свои пожелания.
+    comfort_prefs — строка через запятую («☕ Кофе, 🧣 Плед») или None.
+    """
+    try:
+        supabase.table("client_surveys").upsert({
+            "user_id": user_id,
+            "booking_id": booking_id,
+            "comfort_prefs": comfort_prefs,
+        }, on_conflict="booking_id").execute()
+        logger.info(f"Пожелания сохранены: booking_id={booking_id}, prefs={comfort_prefs}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения пожеланий booking_id={booking_id}: {e}")
+        return False
+
+
+async def get_survey_by_booking_id(booking_id: str) -> Optional[Dict]:
+    """
+    Возвращает пожелания клиента по ID конкретного бронирования.
+    Используется в админке для отображения в карточке бронирования.
+    """
+    try:
+        response = (
+            supabase.table("client_surveys")
+            .select("comfort_prefs")
+            .eq("booking_id", booking_id)
+            .single()
+            .execute()
+        )
+        return response.data
+    except Exception as e:
+        # single() бросает исключение если строк нет — это нормально
+        return None

@@ -17,12 +17,13 @@ from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, Contact
 
-from bot.states import BookingStates
+from bot.states import BookingStates, SurveyStates
 from bot.keyboards import (
     get_services_keyboard,
     get_phone_keyboard,
     get_remove_keyboard,
     get_start_keyboard,
+    get_survey_comfort_keyboard,
 )
 from bot.utils.calendar import (
     build_calendar,
@@ -407,6 +408,18 @@ async def _complete_booking(message: Message, state: FSMContext, phone: str):
             f"время={fsm_data['selected_time']}"
         )
 
+        # Вопрос об уюте — после каждого бронирования
+        await state.set_state(SurveyStates.waiting_comfort)
+        await state.update_data(survey_booking_id=booking["id"], comfort_selected=[])
+        await message.answer(
+            "🌸 Хотим встретить вас с заботой!\n\n"
+            "Что приготовить к вашему визиту?\n"
+            "<i>Можно выбрать несколько вариантов</i>",
+            reply_markup=get_survey_comfort_keyboard(),
+            parse_mode="HTML",
+        )
+        return  # Не сбрасываем FSM — ждём ответа
+
     else:
         # Ошибка создания бронирования
         await message.answer(
@@ -416,7 +429,7 @@ async def _complete_booking(message: Message, state: FSMContext, phone: str):
             reply_markup=get_remove_keyboard(),
         )
 
-    # Сбрасываем FSM — диалог завершён
+    # Сбрасываем FSM — диалог завершён (или если опрос уже был пройден)
     await state.clear()
 
     # Показываем главное меню для новой записи
@@ -468,3 +481,56 @@ async def handle_cancel_booking(callback: CallbackQuery, state: FSMContext):
         text="❌ Запись отменена.\n\nВозвращайтесь когда будете готовы! 💅",
         reply_markup=get_start_keyboard(),
     )
+
+
+# ===================================================
+# ВОПРОС ОБ УЮТЕ (SURVEY)
+# ===================================================
+
+from bot.keyboards import COMFORT_OPTIONS
+
+
+@router.callback_query(SurveyStates.waiting_comfort, F.data.startswith("survey_comfort:"))
+async def handle_survey_comfort(callback: CallbackQuery, state: FSMContext):
+    """
+    Мультивыбор: клиент кликает опции (toggle), затем нажимает «Готово».
+    Каждый клик обновляет клавиатуру — выбранное помечается ✅.
+    """
+    await callback.answer()
+    option = callback.data.split(":", 1)[1]
+    fsm_data = await state.get_data()
+    selected: list = list(fsm_data.get("comfort_selected", []))
+
+    if option == "done":
+        # Сохраняем и завершаем
+        comfort_prefs = (
+            ", ".join(COMFORT_OPTIONS[k] for k in selected if k in COMFORT_OPTIONS)
+            or None
+        )
+        await db.save_survey(
+            user_id=callback.from_user.id,
+            booking_id=fsm_data.get("survey_booking_id", ""),
+            comfort_prefs=comfort_prefs,
+        )
+        await state.clear()
+
+        thanks = "✅ Отлично, всё будет готово к вашему приходу! 🌸" if comfort_prefs \
+            else "✅ Хорошо, ждём вас! 💅"
+        await callback.message.edit_text(thanks)
+        await callback.message.answer(
+            "Чтобы записаться ещё раз, нажмите /start",
+            reply_markup=get_start_keyboard(),
+        )
+
+    else:
+        # Toggle: добавить или убрать опцию
+        if option in selected:
+            selected.remove(option)
+        else:
+            selected.append(option)
+        await state.update_data(comfort_selected=selected)
+
+        # Обновляем клавиатуру с новым состоянием выбора
+        await callback.message.edit_reply_markup(
+            reply_markup=get_survey_comfort_keyboard(selected)
+        )

@@ -547,6 +547,34 @@ def get_admin_slots_list_keyboard(slots: List[Dict]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+COMFORT_OPTIONS = {
+    "coffee":  "☕ Кофе",
+    "tea":     "🍵 Чай",
+    "sweets":  "🍬 Сладости",
+    "blanket": "🧣 Плед",
+}
+
+
+def get_survey_comfort_keyboard(selected: list = None) -> InlineKeyboardMarkup:
+    """
+    Мультивыбор: что подготовить к визиту клиента.
+    Уже выбранные пункты отмечены ✅.
+    Кнопка «Готово» сохраняет выбор и завершает опрос.
+    """
+    selected = selected or []
+    builder = InlineKeyboardBuilder()
+
+    for key, label in COMFORT_OPTIONS.items():
+        prefix = "✅ " if key in selected else ""
+        builder.button(text=f"{prefix}{label}", callback_data=f"survey_comfort:{key}")
+
+    builder.button(text="➡️ Готово", callback_data="survey_comfort:done")
+
+    # 4 опции по 2 в ряд, кнопка готово отдельно
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()
+
+
 def get_delete_confirm_keyboard(booking_id: str) -> InlineKeyboardMarkup:
     """
     Клавиатура подтверждения удаления бронирования.

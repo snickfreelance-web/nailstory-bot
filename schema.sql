@@ -88,3 +88,23 @@ ALTER TABLE bookings   DISABLE ROW LEVEL SECURITY;
 GRANT ALL ON services   TO anon, authenticated, service_role;
 GRANT ALL ON time_slots TO anon, authenticated, service_role;
 GRANT ALL ON bookings   TO anon, authenticated, service_role;
+
+
+-- ===================================================
+-- 6. ПОЖЕЛАНИЯ К ВИЗИТУ (CLIENT SURVEYS)
+-- ===================================================
+-- Своя запись на каждое бронирование.
+-- booking_id UNIQUE — одни пожелания на один визит.
+
+DROP TABLE IF EXISTS client_surveys CASCADE;
+
+CREATE TABLE client_surveys (
+    id            UUID        DEFAULT uuid_generate_v4() PRIMARY KEY,
+    user_id       BIGINT      NOT NULL,
+    booking_id    UUID        NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE,
+    comfort_prefs TEXT,        -- через запятую: "Кофе, Плед" или NULL
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE client_surveys DISABLE ROW LEVEL SECURITY;
+GRANT ALL ON client_surveys TO anon, authenticated, service_role;
