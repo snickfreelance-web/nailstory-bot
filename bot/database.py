@@ -443,24 +443,6 @@ async def get_upcoming_bookings_for_date(target_date: str) -> List[Dict]:
 # АНКЕТА НОВОГО КЛИЕНТА (CLIENT SURVEYS)
 # ===================================================
 
-async def has_survey(user_id: int) -> bool:
-    """
-    Проверяет, заполнял ли клиент анкету ранее.
-    Если да — опрос больше не показывается.
-    При ошибке БД возвращает True (не мешаем клиенту).
-    """
-    try:
-        response = (
-            supabase.table("client_surveys")
-            .select("id")
-            .eq("user_id", user_id)
-            .execute()
-        )
-        return bool(response.data)
-    except Exception as e:
-        logger.error(f"Ошибка проверки анкеты user_id={user_id}: {e}")
-        return True  # При ошибке не блокируем флоу
-
 
 async def save_survey(
     user_id: int,
@@ -468,16 +450,17 @@ async def save_survey(
     comfort_prefs: Optional[str],
 ) -> bool:
     """
-    Сохраняет пожелания клиента к визиту.
+    Сохраняет (или обновляет) пожелания клиента к визиту.
+    Upsert по user_id — каждый новый визит перезаписывает предыдущие предпочтения.
     comfort_prefs — строка через запятую («Кофе, Плед») или None.
     """
     try:
-        supabase.table("client_surveys").insert({
+        supabase.table("client_surveys").upsert({
             "user_id": user_id,
             "booking_id": booking_id,
             "comfort_prefs": comfort_prefs,
-        }).execute()
-        logger.info(f"Анкета сохранена: user_id={user_id}, prefs={comfort_prefs}")
+        }, on_conflict="user_id").execute()
+        logger.info(f"Анкета сохранена/обновлена: user_id={user_id}, prefs={comfort_prefs}")
         return True
     except Exception as e:
         logger.error(f"Ошибка сохранения анкеты user_id={user_id}: {e}")

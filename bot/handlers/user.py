@@ -408,18 +408,17 @@ async def _complete_booking(message: Message, state: FSMContext, phone: str):
             f"время={fsm_data['selected_time']}"
         )
 
-        # Вопрос об уюте — только для тех, кто ещё не отвечал
-        if not await db.has_survey(user.id):
-            await state.set_state(SurveyStates.waiting_comfort)
-            await state.update_data(survey_booking_id=booking["id"], comfort_selected=[])
-            await message.answer(
-                "🌸 Хотим встретить вас с заботой!\n\n"
-                "Что приготовить к вашему визиту?\n"
-                "<i>Можно выбрать несколько вариантов</i>",
-                reply_markup=get_survey_comfort_keyboard(),
-                parse_mode="HTML",
-            )
-            return  # Не сбрасываем FSM — ждём ответа
+        # Вопрос об уюте — после каждого бронирования
+        await state.set_state(SurveyStates.waiting_comfort)
+        await state.update_data(survey_booking_id=booking["id"], comfort_selected=[])
+        await message.answer(
+            "🌸 Хотим встретить вас с заботой!\n\n"
+            "Что приготовить к вашему визиту?\n"
+            "<i>Можно выбрать несколько вариантов</i>",
+            reply_markup=get_survey_comfort_keyboard(),
+            parse_mode="HTML",
+        )
+        return  # Не сбрасываем FSM — ждём ответа
 
     else:
         # Ошибка создания бронирования
