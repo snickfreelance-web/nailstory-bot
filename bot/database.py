@@ -107,6 +107,36 @@ async def delete_service(service_id: str) -> bool:
         return False
 
 
+async def update_service(
+    service_id: str,
+    name: str | None = None,
+    duration_min: int | None = None,
+    price: int | None = None,
+) -> bool:
+    """Обновляет только переданные поля услуги. Возвращает False при конфликте имени."""
+    updates: dict = {}
+    if name is not None:
+        updates["name"] = name
+    if duration_min is not None:
+        updates["duration_min"] = duration_min
+    if price is not None:
+        updates["price"] = price
+
+    if not updates:
+        return True  # нечего менять — успех
+
+    try:
+        supabase.table("services").update(updates).eq("id", service_id).execute()
+        return True
+    except Exception as e:
+        err = str(e)
+        if "23505" in err or "unique" in err.lower() or "duplicate" in err.lower():
+            logger.warning(f"Конфликт имени при обновлении услуги {service_id}: {e}")
+        else:
+            logger.error(f"Ошибка обновления услуги {service_id}: {e}")
+        return False
+
+
 async def service_has_bookings(service_id: str) -> bool:
     try:
         response = (

@@ -350,6 +350,7 @@ def get_admin_service_detail_keyboard(service_id: str, is_active: bool) -> Inlin
         toggle_text = "✅ Показать клиентам"
         toggle_data = f"admin_svc_show:{service_id}"
 
+    builder.button(text="✏️ Редактировать", callback_data=f"admin_svc_edit:{service_id}")
     builder.button(text=toggle_text, callback_data=toggle_data)
     builder.button(text="🗑 Удалить услугу", callback_data=f"admin_svc_del:{service_id}")
     builder.button(text="◀ К списку услуг", callback_data="admin:services")
@@ -391,6 +392,52 @@ def get_admin_duration_keyboard() -> InlineKeyboardMarkup:
     # По 2 кнопки в ряд, кнопка отмены отдельно
     builder.adjust(2, 2, 2, 1)
     return builder.as_markup()
+
+
+def get_admin_edit_skip_keyboard(skip_cb: str, cancel_cb: str) -> InlineKeyboardMarkup:
+    """
+    Универсальная клавиатура для шагов редактирования.
+    Используется на шагах ввода имени и цены (текстовый ввод).
+
+    Args:
+        skip_cb: callback_data для кнопки «Пропустить»
+        cancel_cb: callback_data для кнопки «Отмена»
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⏭ Пропустить", callback_data=skip_cb)
+    builder.button(text="❌ Отмена", callback_data=cancel_cb)
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def get_admin_edit_duration_keyboard() -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора длительности при редактировании услуги.
+    Аналог get_admin_duration_keyboard(), но добавлена кнопка «Пропустить».
+    """
+    builder = InlineKeyboardBuilder()
+
+    durations = [30, 45, 60, 75, 90, 120]
+
+    for dur in durations:
+        if dur >= 60:
+            hours = dur // 60
+            mins = dur % 60
+            if mins == 0:
+                label = f"⏱ {hours} ч"
+            else:
+                label = f"⏱ {hours} ч {mins} мин"
+        else:
+            label = f"⏱ {dur} мин"
+        builder.button(text=label, callback_data=f"duration:{dur}")
+
+    builder.button(text="⏭ Пропустить", callback_data="edit_skip_duration")
+    builder.button(text="❌ Отмена", callback_data="edit_cancel")
+
+    # 6 кнопок по 2 в ряд, затем 2 служебных отдельно
+    builder.adjust(2, 2, 2, 2)
+    return builder.as_markup()
+
 
 
 def get_admin_bookings_filter_keyboard() -> InlineKeyboardMarkup:

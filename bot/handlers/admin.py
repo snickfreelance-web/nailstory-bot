@@ -18,6 +18,8 @@ from bot.keyboards import (
     get_admin_services_keyboard,
     get_admin_service_detail_keyboard,
     get_admin_duration_keyboard,
+    get_admin_edit_skip_keyboard,
+    get_admin_edit_duration_keyboard,
     get_admin_bookings_filter_keyboard,
     get_admin_booking_actions_keyboard,
     get_admin_pagination_keyboard,
@@ -497,6 +499,302 @@ async def handle_admin_service_delete(callback: CallbackQuery):
         )
     else:
         await callback.answer("❌ Ошибка удаления. Попробуйте ещё раз.", show_alert=True)
+
+
+# ===================================================
+# 3б. РЕДАКТИРОВАНИЕ УСЛУГИ
+# ===================================================
+
+async def _show_edit_name_step(target, service: dict) -> None:
+    """Отображает шаг 1/3 редактирования: ввод нового названия."""
+    text = (
+        f"✏️ <b>Редактирование услуги</b>\n\n"
+        f"Текущее название: <b>{service['name']}</b>\n\n"
+        "Шаг 1/3: Введите <b>новое название</b> или пропустите:"
+    )
+    kb = get_admin_edit_skip_keyboard("edit_skip_name", "edit_cancel")
+    if hasattr(target, "message"):
+        await target.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await target.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+async def _show_edit_duration_step(target, service: dict) -> None:
+    """Отображает шаг 2/3 редактирования: выбор новой длительности."""
+    text = (
+        f"✏️ <b>Редактирование услуги</b>\n\n"
+        f"Текущая длительность: <b>{service['duration_min']} мин</b>\n\n"
+        "Шаг 2/3: Выберите <b>новую длительность</b> или пропустите:"
+    )
+    kb = get_admin_edit_duration_keyboard()
+    if hasattr(target, "message"):
+        await target.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await target.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+async def _show_edit_price_step(target, service: dict) -> None:
+    """Отображает шаг 3/3 редактирования: ввод новой цены."""
+    text = (
+        f"✏️ <b>Редактирование услуги</b>\n\n"
+        f"Текущая цена: <b>{service['price']} ₽</b>\n\n"
+        "Шаг 3/3: Введите <b>новую цену</b> (₽) или пропустите:"
+    )
+    kb = get_admin_edit_skip_keyboard("edit_skip_price", "edit_cancel")
+    if hasattr(target, "message"):
+        await target.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await target.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+async def _apply_and_finish_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    """Собирает изменения из FSM, сохраняет в БД, показывает результат."""
+    data = await state.get_data()
+    service_id = data["edit_service_id"]
+    new_name = data.get("edit_new_name")
+    new_duration = data.get("edit_new_duration")
+    new_price = data.get("edit_new_price")
+    await state.clear()
+
+    # Если ни одного поля не изменили
+    if new_name is None and new_duration is None and new_price is None:
+        service = await db.get_service_by_id(service_id)
+        await callback.answer("Ничего не изменено", show_alert=False)
+        if service:
+            status_text = "✅ Активна" if service["is_active"] else "🔴 Скрыта"
+            await callback.message.edit_text(
+                text=(
+                    f"💅 <b>{service['name']}</b>\n\n"
+                    f"💰 Цена: {service['price']} ₽\n"
+                    f"⏱ Длительность: {service['duration_min']} мин\n"
+                    f"Статус: {status_text}"
+                ),
+                reply_markup=get_admin_service_detail_keyboard(service_id, service["is_active"]),
+                parse_mode="HTML",
+            )
+        return
+
+    success = await db.update_service(
+        service_id,
+        name=new_name,
+        duration_min=new_duration,
+        price=new_price,
+    )
+
+    service = await db.get_service_by_id(service_id)
+
+    if success and service:
+        status_text = "✅ Активна" if service["is_active"] else "🔴 Скрыта"
+        await callback.message.edit_text(
+            text=(
+                "✅ <b>Услуга обновлена!</b>\n\n"
+                f"💅 {service['name']}\n"
+                f"⏱ {service['duration_min']} мин\n"
+                f"💰 {service['price']} ₽\n"
+                f"Статус: {status_text}"
+            ),
+            reply_markup=get_admin_service_detail_keyboard(service_id, service["is_active"]),
+            parse_mode="HTML",
+        )
+    elif not success:
+        # Скорее всего конфликт имени
+        builder = InlineKeyboardBuilder()
+        builder.button(text="✏️ Попробовать снова", callback_data=f"admin_svc_edit:{service_id}")
+        builder.button(text="◀ К услуге", callback_data=f"admin_svc:{service_id}")
+        builder.adjust(1)
+        await callback.message.edit_text(
+            text=(
+                "❌ <b>Ошибка при сохранении</b>\n\n"
+                "Возможно, услуга с таким названием уже существует.\n"
+                "Попробуйте другое название."
+            ),
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
+    else:
+        await callback.answer("✅ Обновлено", show_alert=False)
+
+
+@router.callback_query(F.data.startswith("admin_svc_edit:"))
+async def handle_admin_service_edit_start(callback: CallbackQuery, state: FSMContext):
+    """Запускает флоу редактирования: загружает услугу в FSM, показывает шаг 1."""
+    await callback.answer()
+    service_id = callback.data.split(":", 1)[1]
+
+    service = await db.get_service_by_id(service_id)
+    if not service:
+        await callback.answer("Услуга не найдена", show_alert=True)
+        return
+
+    await state.set_state(AdminServiceStates.waiting_edit_name)
+    await state.update_data(edit_service_id=service_id)
+    await _show_edit_name_step(callback, service)
+
+
+@router.message(AdminServiceStates.waiting_edit_name, F.text)
+async def handle_admin_edit_name_input(message: Message, state: FSMContext):
+    """Шаг 1: администратор ввёл новое название."""
+    name = message.text.strip()
+    if len(name) < 3:
+        await message.answer("❌ Название слишком короткое. Минимум 3 символа.")
+        return
+    if len(name) > 100:
+        await message.answer("❌ Название слишком длинное. Максимум 100 символов.")
+        return
+
+    await state.update_data(edit_new_name=name)
+    await state.set_state(AdminServiceStates.waiting_edit_duration)
+
+    data = await state.get_data()
+    service = await db.get_service_by_id(data["edit_service_id"])
+    if service:
+        await _show_edit_duration_step(message, service)
+
+
+@router.message(AdminServiceStates.waiting_edit_name)
+async def handle_admin_edit_name_invalid(message: Message):
+    await message.answer("❌ Введите название услуги текстом.")
+
+
+@router.callback_query(F.data == "edit_skip_name")
+async def handle_admin_edit_name_skip(callback: CallbackQuery, state: FSMContext):
+    """Шаг 1: пропустить изменение названия."""
+    await callback.answer()
+    await state.set_state(AdminServiceStates.waiting_edit_duration)
+
+    data = await state.get_data()
+    service = await db.get_service_by_id(data["edit_service_id"])
+    if service:
+        await _show_edit_duration_step(callback, service)
+
+
+@router.callback_query(AdminServiceStates.waiting_edit_duration, F.data.startswith("duration:"))
+async def handle_admin_edit_duration(callback: CallbackQuery, state: FSMContext):
+    """Шаг 2: администратор выбрал новую длительность."""
+    await callback.answer()
+    duration = int(callback.data.split(":")[1])
+
+    await state.update_data(edit_new_duration=duration)
+    await state.set_state(AdminServiceStates.waiting_edit_price)
+
+    data = await state.get_data()
+    service = await db.get_service_by_id(data["edit_service_id"])
+    if service:
+        await _show_edit_price_step(callback, service)
+
+
+@router.callback_query(F.data == "edit_skip_duration")
+async def handle_admin_edit_duration_skip(callback: CallbackQuery, state: FSMContext):
+    """Шаг 2: пропустить изменение длительности."""
+    await callback.answer()
+    await state.set_state(AdminServiceStates.waiting_edit_price)
+
+    data = await state.get_data()
+    service = await db.get_service_by_id(data["edit_service_id"])
+    if service:
+        await _show_edit_price_step(callback, service)
+
+
+@router.message(AdminServiceStates.waiting_edit_price, F.text)
+async def handle_admin_edit_price_input(message: Message, state: FSMContext):
+    """Шаг 3: администратор ввёл новую цену — применяем все изменения."""
+    price_str = message.text.strip()
+    if not is_valid_price(price_str):
+        await message.answer(
+            "❌ Некорректная цена. Введите целое положительное число, например: <code>1500</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    await state.update_data(edit_new_price=int(price_str))
+
+    # Применяем через фиктивный callback (отправляем новое сообщение с результатом)
+    data = await state.get_data()
+    service_id = data["edit_service_id"]
+    new_name = data.get("edit_new_name")
+    new_duration = data.get("edit_new_duration")
+    new_price = int(price_str)
+    await state.clear()
+
+    success = await db.update_service(service_id, name=new_name, duration_min=new_duration, price=new_price)
+    service = await db.get_service_by_id(service_id)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💅 К услуге", callback_data=f"admin_svc:{service_id}")
+    builder.button(text="◀ Список услуг", callback_data="admin:services")
+    builder.adjust(1)
+
+    if success and service:
+        await message.answer(
+            text=(
+                "✅ <b>Услуга обновлена!</b>\n\n"
+                f"💅 {service['name']}\n"
+                f"⏱ {service['duration_min']} мин\n"
+                f"💰 {service['price']} ₽"
+            ),
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML",
+        )
+    else:
+        builder2 = InlineKeyboardBuilder()
+        builder2.button(text="✏️ Попробовать снова", callback_data=f"admin_svc_edit:{service_id}")
+        builder2.button(text="◀ К услуге", callback_data=f"admin_svc:{service_id}")
+        builder2.adjust(1)
+        await message.answer(
+            text=(
+                "❌ <b>Ошибка при сохранении</b>\n\n"
+                "Возможно, услуга с таким названием уже существует."
+            ),
+            reply_markup=builder2.as_markup(),
+            parse_mode="HTML",
+        )
+
+
+@router.message(AdminServiceStates.waiting_edit_price)
+async def handle_admin_edit_price_invalid(message: Message):
+    await message.answer(
+        "❌ Введите цену числом, например: <code>1500</code>",
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "edit_skip_price")
+async def handle_admin_edit_price_skip(callback: CallbackQuery, state: FSMContext):
+    """Шаг 3: пропустить изменение цены — применяем накопленные изменения."""
+    await _apply_and_finish_edit(callback, state)
+
+
+@router.callback_query(F.data == "edit_cancel")
+async def handle_admin_edit_cancel(callback: CallbackQuery, state: FSMContext):
+    """Отмена редактирования — возвращаемся на детали услуги."""
+    await callback.answer("Редактирование отменено")
+    data = await state.get_data()
+    service_id = data.get("edit_service_id")
+    await state.clear()
+
+    if service_id:
+        service = await db.get_service_by_id(service_id)
+        if service:
+            status_text = "✅ Активна" if service["is_active"] else "🔴 Скрыта"
+            await callback.message.edit_text(
+                text=(
+                    f"💅 <b>{service['name']}</b>\n\n"
+                    f"💰 Цена: {service['price']} ₽\n"
+                    f"⏱ Длительность: {service['duration_min']} мин\n"
+                    f"Статус: {status_text}"
+                ),
+                reply_markup=get_admin_service_detail_keyboard(service_id, service["is_active"]),
+                parse_mode="HTML",
+            )
+            return
+
+    # Фолбэк — список услуг
+    services = await db.get_all_services(active_only=False)
+    await callback.message.edit_text(
+        text="💅 <b>Управление услугами</b>\n\nНажмите на услугу для управления:",
+        reply_markup=get_admin_services_keyboard(services),
+        parse_mode="HTML",
+    )
 
 
 # ===================================================
