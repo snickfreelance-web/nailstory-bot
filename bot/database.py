@@ -189,6 +189,33 @@ async def get_available_dates(year: int, month: int) -> List[str]:
         return []
 
 
+async def get_dates_with_any_slots(year: int, month: int) -> List[str]:
+    """Возвращает даты месяца, на которые уже созданы слоты (любые, не только свободные).
+    Используется для визуального маркера в админском календаре (📅)."""
+    try:
+        month_str = f"{year:04d}-{month:02d}"
+        start_date = f"{month_str}-01"
+        if month == 12:
+            end_date = f"{year + 1:04d}-01-01"
+        else:
+            end_date = f"{year:04d}-{month + 1:02d}-01"
+
+        response = (
+            supabase.table("time_slots")
+            .select("slot_date")
+            .gte("slot_date", start_date)
+            .lt("slot_date", end_date)
+            .execute()
+        )
+        if not response.data:
+            return []
+        dates = list(set(row["slot_date"] for row in response.data))
+        return sorted(dates)
+    except Exception as e:
+        logger.error(f"Ошибка получения дат со слотами: {e}")
+        return []
+
+
 async def get_available_slots(slot_date: str) -> List[Dict]:
     try:
         response = (
