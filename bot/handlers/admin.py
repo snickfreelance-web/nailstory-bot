@@ -19,7 +19,7 @@ from datetime import date
 from aiogram import Router, F, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery, TelegramObject
+from aiogram.types import Message, CallbackQuery, TelegramObject, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from typing import Callable, Dict, Any, Awaitable
 
