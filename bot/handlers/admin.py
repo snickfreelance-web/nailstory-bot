@@ -5,7 +5,7 @@
 import logging
 from datetime import date
 from aiogram import Router, F, BaseMiddleware
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, TelegramObject
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -1214,7 +1214,10 @@ async def handle_admin_rs_cal_nav(callback: CallbackQuery, state: FSMContext):
     )
 
 
-@router.callback_query(AdminRescheduleStates.waiting_new_date, F.data.startswith("admin_rs_cal_date:"))
+@router.callback_query(
+    StateFilter(AdminRescheduleStates.waiting_new_date, AdminRescheduleStates.waiting_confirm),
+    F.data.startswith("admin_rs_cal_date:"),
+)
 async def handle_admin_rs_cal_date(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     date_str = callback.data.split(":", 1)[1]
@@ -1270,6 +1273,7 @@ async def handle_admin_rs_back_to_calendar(callback: CallbackQuery, state: FSMCo
 
 @router.callback_query(AdminRescheduleStates.waiting_new_time, F.data.startswith("slot:"))
 async def handle_admin_reschedule_time(callback: CallbackQuery, state: FSMContext):
+    """Выбрано время — показываем экран подтверждения переноса."""
     await callback.answer()
 
     parts = callback.data.split(":")
@@ -1277,18 +1281,56 @@ async def handle_admin_reschedule_time(callback: CallbackQuery, state: FSMContex
     new_time = f"{parts[2]}:{parts[3]}:00"
 
     fsm_data = await state.get_data()
+    await state.update_data(reschedule_new_slot_id=new_slot_id, reschedule_new_time=new_time)
+    await state.set_state(AdminRescheduleStates.waiting_confirm)
+
+    booking = await db.get_booking_by_id(fsm_data["reschedule_booking_id"])
+    new_date = fsm_data["reschedule_new_date"]
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, перенести", callback_data="admin_rs_confirm")
+    builder.button(
+        text="← Нет, назад к выбору времени",
+        callback_data=f"admin_rs_cal_date:{new_date}",
+    )
+    builder.adjust(1)
+
+    await callback.message.edit_text(
+        text=(
+            "📅 <b>Подтвердите перенос</b>\n\n"
+            f"Клиент: {booking['full_name']}\n"
+            f"Было: {format_date_ru(booking['booking_date'])}, "
+            f"{format_time_ru(booking['booking_time'])}\n"
+            f"Станет: <b>{format_date_ru(new_date)}, {format_time_ru(new_time)}</b>\n\n"
+            "Это действие нельзя отменить. Запись будет перенесена, "
+            "старый слот освободится и станет доступен для записи."
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminRescheduleStates.waiting_confirm, F.data == "admin_rs_confirm")
+async def handle_admin_reschedule_confirm(callback: CallbackQuery, state: FSMContext):
+    """Выполняет фактический перенос после подтверждения."""
+    await callback.answer()
+
+    fsm_data = await state.get_data()
     await state.clear()
 
     success = await db.reschedule_booking(
         booking_id=fsm_data["reschedule_booking_id"],
-        old_slot_id=fsm_data.get("reschedule_old_slot_id", ""),
-        new_slot_id=new_slot_id,
+        old_slot_id=fsm_data.get("reschedule_old_slot_id") or "",
+        new_slot_id=fsm_data["reschedule_new_slot_id"],
         new_date=fsm_data["reschedule_new_date"],
-        new_time=new_time,
+        new_time=fsm_data["reschedule_new_time"],
     )
 
     builder = InlineKeyboardBuilder()
-    builder.button(text="📋 К бронированию", callback_data=f"admin_bk_view:{fsm_data['reschedule_booking_id']}")
+    builder.button(
+        text="📋 К бронированию",
+        callback_data=f"admin_bk_view:{fsm_data['reschedule_booking_id']}",
+    )
     builder.button(text="◀ Меню", callback_data="admin:main")
     builder.adjust(1)
 
@@ -1297,7 +1339,7 @@ async def handle_admin_reschedule_time(callback: CallbackQuery, state: FSMContex
             text=(
                 "✅ <b>Бронирование перенесено!</b>\n\n"
                 f"Новая дата: <b>{format_date_ru(fsm_data['reschedule_new_date'])}</b>\n"
-                f"Новое время: <b>{new_time[:5]}</b>"
+                f"Новое время: <b>{fsm_data['reschedule_new_time'][:5]}</b>"
             ),
             reply_markup=builder.as_markup(),
             parse_mode="HTML",
