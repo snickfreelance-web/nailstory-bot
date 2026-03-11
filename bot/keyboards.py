@@ -487,9 +487,9 @@ def get_admin_booking_actions_keyboard(
         Клавиатура с действиями
 
     Доступные действия зависят от статуса:
-        pending:   [Подтвердить] [Перенести] [Отменить] [Удалить]
-        confirmed: [Перенести] [Отменить] [Удалить]
-        cancelled: [Удалить] [Восстановить]
+        pending:   [Подтвердить] [Перенести] [Отменить] [Назад]
+        confirmed: [Перенести] [Отменить] [Назад]
+        cancelled: [Назад]
     """
     builder = InlineKeyboardBuilder()
 
@@ -508,17 +508,6 @@ def get_admin_booking_actions_keyboard(
             text="❌ Отменить",
             callback_data=f"admin_bk_cancel:{booking_id}"
         )
-
-    if current_status == "cancelled":
-        builder.button(
-            text="🔄 Восстановить",
-            callback_data=f"admin_bk_restore:{booking_id}"
-        )
-
-    builder.button(
-        text="🗑 Удалить",
-        callback_data=f"admin_bk_delete:{booking_id}"
-    )
 
     # Кнопка возврата: либо к списку по дате, либо к пагинированному списку
     builder.button(

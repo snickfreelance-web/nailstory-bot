@@ -26,7 +26,6 @@ from bot.keyboards import (
     get_admin_schedule_keyboard,
     get_admin_time_slots_keyboard,
     get_admin_slots_list_keyboard,
-    get_delete_confirm_keyboard,
     get_admin_admins_keyboard,
     get_admin_transfer_keyboard,
 )
@@ -1084,107 +1083,60 @@ async def handle_admin_booking_confirm(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("admin_bk_cancel:"))
-async def handle_admin_booking_cancel(callback: CallbackQuery):
+async def handle_admin_booking_cancel_prompt(callback: CallbackQuery):
+    """Показывает экран подтверждения отмены."""
     await callback.answer()
 
     booking_id = callback.data.split(":", 1)[1]
 
-    booking = await db.get_booking_by_id(booking_id)
-    if booking:
-        slot = await db.get_slot_by_date_time(booking["booking_date"], booking["booking_time"])
-        if slot:
-            await db.mark_slot_available(slot["id"])
-
-    success = await db.update_booking_status(booking_id, "cancelled")
-
-    if success:
-        await callback.answer("❌ Бронирование отменено. Слот освобождён.", show_alert=True)
-        booking = await db.get_booking_by_id(booking_id)
-        if booking:
-            await callback.message.edit_text(
-                text=await _render_booking_detail(booking),
-                reply_markup=get_admin_booking_actions_keyboard(
-                    booking_id, booking["status"],
-                    back_cb=f"admin_bk_cal_date:{booking['booking_date']}",
-                ),
-                parse_mode="HTML",
-            )
-    else:
-        await callback.answer("❌ Ошибка. Попробуйте ещё раз.", show_alert=True)
-
-
-@router.callback_query(F.data.startswith("admin_bk_restore:"))
-async def handle_admin_booking_restore(callback: CallbackQuery):
-    await callback.answer()
-
-    booking_id = callback.data.split(":", 1)[1]
-
-    booking = await db.get_booking_by_id(booking_id)
-    if booking:
-        slot = await db.get_slot_by_date_time(booking["booking_date"], booking["booking_time"])
-        if slot and not slot["is_available"]:
-            await callback.answer(
-                "⚠️ Слот уже занят другим клиентом. Восстановление невозможно.",
-                show_alert=True
-            )
-            return
-        if slot:
-            await db.mark_slot_unavailable(slot["id"])
-
-    success = await db.update_booking_status(booking_id, "pending")
-
-    if success:
-        await callback.answer("🔄 Бронирование восстановлено", show_alert=True)
-        booking = await db.get_booking_by_id(booking_id)
-        if booking:
-            await callback.message.edit_text(
-                text=await _render_booking_detail(booking),
-                reply_markup=get_admin_booking_actions_keyboard(
-                    booking_id, booking["status"],
-                    back_cb=f"admin_bk_cal_date:{booking['booking_date']}",
-                ),
-                parse_mode="HTML",
-            )
-
-
-@router.callback_query(F.data.startswith("admin_bk_delete:"))
-async def handle_admin_booking_delete_confirm_prompt(callback: CallbackQuery):
-    await callback.answer()
-
-    booking_id = callback.data.split(":", 1)[1]
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, отменить", callback_data=f"admin_bk_cancel_do:{booking_id}")
+    builder.button(text="← Нет, назад", callback_data=f"admin_bk_date_view:{booking_id}")
+    builder.adjust(1)
 
     await callback.message.edit_text(
         text=(
-            "🗑 <b>Удалить бронирование?</b>\n\n"
-            "⚠️ Это действие нельзя отменить!\n"
-            "Слот будет освобождён и станет доступен для записи."
+            "⚠️ <b>Отменить запись?</b>\n\n"
+            "Это действие нельзя отменить.\n"
+            "Запись будет удалена, слот освобождён и снова станет доступен для записи."
         ),
-        reply_markup=get_delete_confirm_keyboard(booking_id),
+        reply_markup=builder.as_markup(),
         parse_mode="HTML",
     )
 
 
-@router.callback_query(F.data.startswith("admin_bk_delete_confirm:"))
-async def handle_admin_booking_delete(callback: CallbackQuery):
+@router.callback_query(F.data.startswith("admin_bk_cancel_do:"))
+async def handle_admin_booking_cancel_do(callback: CallbackQuery):
+    """Выполняет фактическое удаление бронирования."""
     await callback.answer()
 
     booking_id = callback.data.split(":", 1)[1]
+
+    booking = await db.get_booking_by_id(booking_id)
+    if not booking:
+        await callback.answer("Бронирование не найдено", show_alert=True)
+        return
+
+    date_str = booking["booking_date"]
+    year, month = int(date_str[:4]), int(date_str[5:7])
+
     success = await db.delete_booking(booking_id)
 
     if success:
-        await callback.answer("🗑 Бронирование удалено", show_alert=True)
+        await callback.answer("✅ Запись отменена. Слот освобождён.", show_alert=True)
 
         builder = InlineKeyboardBuilder()
-        builder.button(text="📋 К списку", callback_data="admin_bk_filter:all")
+        builder.button(text="← К записям за эту дату", callback_data=f"admin_bk_cal_date:{date_str}")
+        builder.button(text="📅 Выбрать другую дату", callback_data=f"admin_bk_pick_date:{year}:{month}")
         builder.button(text="◀ Меню", callback_data="admin:main")
         builder.adjust(1)
 
         await callback.message.edit_text(
-            text="✅ Бронирование удалено. Слот освобождён.",
+            text="✅ Запись отменена. Слот освобождён.",
             reply_markup=builder.as_markup(),
         )
     else:
-        await callback.answer("❌ Ошибка удаления. Попробуйте ещё раз.", show_alert=True)
+        await callback.answer("❌ Ошибка. Попробуйте ещё раз.", show_alert=True)
 
 
 # ===================================================
