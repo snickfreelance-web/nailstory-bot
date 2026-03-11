@@ -130,7 +130,7 @@ async def handle_service_selected(callback: CallbackQuery, state: FSMContext):
             f"💰 Стоимость: {service['price']} ₽\n"
             f"⏱ Длительность: {service['duration_min']} мин\n\n"
             "📅 <b>Выберите удобную дату:</b>\n"
-            "✅ — есть свободное время"
+            "🟢 — доступно для записи"
         ),
         reply_markup=calendar_markup,
         parse_mode="HTML",
@@ -173,7 +173,7 @@ async def handle_calendar_navigation(callback: CallbackQuery, state: FSMContext)
         text=(
             f"✅ Услуга: <b>{fsm_data.get('service_name')}</b>\n\n"
             "📅 <b>Выберите удобную дату:</b>\n"
-            "✅ — есть свободное время"
+            "🟢 — доступно для записи"
         ),
         reply_markup=calendar_markup,
         parse_mode="HTML",

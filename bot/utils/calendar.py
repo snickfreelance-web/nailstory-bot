@@ -134,12 +134,12 @@ def build_calendar(
 
                 if is_available and not is_past:
                     builder.button(
-                        text=f"✅{day_num}",
+                        text=f"🟢{day_num}",
                         callback_data=f"cal_date:{day_str}"
                     )
                 else:
                     builder.button(
-                        text=f"·{day_num}",
+                        text=str(day_num),
                         callback_data="cal_ignore"
                     )
 
