@@ -1398,7 +1398,7 @@ async def _show_admins_menu(
                 label = f"ID {tid}"
 
             if tid == owner_id:
-                lines.append(f"  👑 {label}")
+                lines.append(f"  👑 {label} — <b>владелец</b>")
             else:
                 lines.append(f"  • {label}")
 
