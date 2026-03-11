@@ -863,7 +863,7 @@ async def _show_bookings_for_date(message, date_str: str, edit: bool = False):
             icon = status_icons.get(booking["status"], "?")
             builder.button(
                 text=f"{icon} {booking['full_name']} · {time_str}",
-                callback_data=f"admin_bk_date_view:{booking['id']}:{date_str}"
+                callback_data=f"admin_bk_date_view:{booking['id']}"
             )
         builder.button(text="← Выбрать другую дату", callback_data=back_cb)
         builder.adjust(1)
@@ -911,16 +911,15 @@ async def handle_admin_bk_date_view(callback: CallbackQuery):
     """Открывает карточку бронирования с кнопкой возврата к списку за дату."""
     await callback.answer()
 
-    # Формат: "admin_bk_date_view:{booking_uuid}:{YYYY-MM-DD}"
-    # UUID содержит дефисы, дата тоже — разбиваем на 3 части максимум
-    parts = callback.data.split(":", 2)
-    booking_id = parts[1]
-    date_str = parts[2]  # "YYYY-MM-DD"
+    # Формат: "admin_bk_date_view:{booking_uuid}" — дату берём из бронирования
+    booking_id = callback.data.split(":", 1)[1]
 
     booking = await db.get_booking_by_id(booking_id)
     if not booking:
         await callback.answer("Бронирование не найдено", show_alert=True)
         return
+
+    date_str = booking["booking_date"]  # YYYY-MM-DD из объекта бронирования
 
     await callback.message.edit_text(
         text=await _render_booking_detail(booking),
