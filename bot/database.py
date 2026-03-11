@@ -5,6 +5,7 @@
 from supabase import create_client, Client
 from bot.config import settings
 from typing import Optional, List, Dict
+from datetime import date
 import logging
 
 logger = logging.getLogger(__name__)
@@ -164,11 +165,16 @@ async def get_available_dates(year: int, month: int) -> List[str]:
         else:
             end_date = f"{year:04d}-{month + 1:02d}-01"
 
+        # Нижняя граница — максимум из 1-го числа месяца и сегодня
+        # (не тянем прошедшие даты, build_calendar всё равно их скрывает)
+        today_str = date.today().isoformat()
+        effective_start = max(start_date, today_str)
+
         response = (
             supabase.table("time_slots")
             .select("slot_date")
             .eq("is_available", True)
-            .gte("slot_date", start_date)
+            .gte("slot_date", effective_start)
             .lt("slot_date", end_date)
             .execute()
         )

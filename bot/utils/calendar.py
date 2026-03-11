@@ -49,6 +49,10 @@ def build_calendar(
        - Если день доступен → кнопка с callback_data
        - Если нет → кнопка с текстом "·" и callback "ignore"
 
+    Особенности:
+    - Кнопка ◀ скрыта для текущего и прошлых месяцев
+    - Если available_dates пуст — показывается заглушка «нет дат»
+
     Args:
         year: Год для отображения
         month: Месяц 1-12 для отображения
@@ -65,33 +69,46 @@ def build_calendar(
     # ---------------------------------------------------
     # Строка 1: Навигация по месяцам
     # ---------------------------------------------------
-    # Вычисляем предыдущий и следующий месяц для кнопок ◀ ▶
     prev_month = month - 1 if month > 1 else 12
     prev_year = year if month > 1 else year - 1
     next_month = month + 1 if month < 12 else 1
     next_year = year if month < 12 else year + 1
 
-    # Кнопка "назад" — переключает на предыдущий месяц
-    # callback_data: "cal_prev:2024:3" (год и месяц КУДА переключить)
-    builder.button(
-        text="◀",
-        callback_data=f"cal_nav:{prev_year}:{prev_month}"
-    )
+    # Кнопка ◀: скрываем, если просматриваем текущий или прошлый месяц
+    is_current_or_past_month = (year, month) <= (today.year, today.month)
+    if is_current_or_past_month:
+        builder.button(text=" ", callback_data="cal_ignore")
+    else:
+        builder.button(text="◀", callback_data=f"cal_nav:{prev_year}:{prev_month}")
 
-    # Заголовок с названием месяца — нажать нельзя (ignore)
+    # Заголовок с названием месяца
     builder.button(
         text=f"{MONTHS_RU[month]} {year}",
         callback_data="cal_ignore"
     )
 
-    # Кнопка "вперёд" — переключает на следующий месяц
+    # Кнопка ▶
     builder.button(
         text="▶",
         callback_data=f"cal_nav:{next_year}:{next_month}"
     )
 
-    # Устанавливаем ширину строки = 3 кнопки (◀, заголовок, ▶)
     builder.adjust(3)
+
+    # ---------------------------------------------------
+    # Если нет доступных дат — показываем заглушку
+    # ---------------------------------------------------
+    if not available_dates:
+        builder.button(
+            text="😔 Нет свободного времени в этом месяце",
+            callback_data="cal_ignore"
+        )
+        builder.button(
+            text="▶ Следующий месяц",
+            callback_data=f"cal_nav:{next_year}:{next_month}"
+        )
+        builder.adjust(3, 1, 1)
+        return builder.as_markup()
 
     # ---------------------------------------------------
     # Строка 2: Заголовки дней недели
@@ -99,56 +116,33 @@ def build_calendar(
     for day_name in WEEKDAYS:
         builder.button(text=day_name, callback_data="cal_ignore")
 
-    # Строка из 7 кнопок (дни недели)
-    builder.adjust(3, 7)
-
     # ---------------------------------------------------
     # Строки 3+: Числа месяца
     # ---------------------------------------------------
-    # calendar.monthcalendar возвращает список недель.
-    # Каждая неделя — список из 7 чисел (0 = пустая клетка).
-    # Например: [[0, 0, 0, 1, 2, 3, 4], [5, 6, 7, 8, 9, 10, 11], ...]
     month_calendar = calendar.monthcalendar(year, month)
 
     for week in month_calendar:
-        week_buttons_count = 0  # Счётчик кнопок в текущей строке
-
         for day_num in week:
             if day_num == 0:
-                # Пустая клетка (день принадлежит соседнему месяцу)
                 builder.button(text=" ", callback_data="cal_ignore")
             else:
-                # Формируем строку даты для проверки доступности
                 day_str = f"{year:04d}-{month:02d}-{day_num:02d}"
                 day_date = date(year, month, day_num)
 
-                # Проверяем: дата в прошлом или сегодня — нельзя записаться
                 is_past = day_date <= today
-
-                # Проверяем: есть ли свободные слоты на эту дату
                 is_available = day_str in available_dates
 
                 if is_available and not is_past:
-                    # ✅ Доступная дата — интерактивная кнопка
-                    # callback_data = "cal_date:2024-03-05"
                     builder.button(
-                        text=f"✅{day_num}",
+                        text=f"🟢{day_num}",
                         callback_data=f"cal_date:{day_str}"
                     )
                 else:
-                    # · Недоступная дата — декоративная кнопка
                     builder.button(
-                        text=f"·{day_num}",
+                        text=str(day_num),
                         callback_data="cal_ignore"
                     )
 
-            week_buttons_count += 1
-
-        # Каждая неделя = строка из 7 кнопок
-        # adjust работает кумулятивно, поэтому передаём полный список
-    
-    # Пересобираем с правильными отступами
-    # Строка 1: 3 кнопки, Строка 2: 7 кнопок, Остальные: по 7
     row_widths = [3, 7] + [7] * len(month_calendar)
     builder.adjust(*row_widths)
 

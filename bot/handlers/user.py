@@ -130,7 +130,7 @@ async def handle_service_selected(callback: CallbackQuery, state: FSMContext):
             f"💰 Стоимость: {service['price']} ₽\n"
             f"⏱ Длительность: {service['duration_min']} мин\n\n"
             "📅 <b>Выберите удобную дату:</b>\n"
-            "✅ — есть свободное время"
+            "🟢 — доступно для записи"
         ),
         reply_markup=calendar_markup,
         parse_mode="HTML",
@@ -163,6 +163,9 @@ async def handle_calendar_navigation(callback: CallbackQuery, state: FSMContext)
     # Получаем данные FSM чтобы показать выбранную услугу
     fsm_data = await state.get_data()
 
+    # Сохраняем текущий просматриваемый месяц — чтобы «Назад к дате» вернул сюда
+    await state.update_data(cal_year=year, cal_month=month)
+
     calendar_markup = build_calendar(year, month, available_dates)
 
     # Редактируем существующее сообщение (не отправляем новое)
@@ -170,7 +173,7 @@ async def handle_calendar_navigation(callback: CallbackQuery, state: FSMContext)
         text=(
             f"✅ Услуга: <b>{fsm_data.get('service_name')}</b>\n\n"
             "📅 <b>Выберите удобную дату:</b>\n"
-            "✅ — есть свободное время"
+            "🟢 — доступно для записи"
         ),
         reply_markup=calendar_markup,
         parse_mode="HTML",
@@ -235,7 +238,9 @@ async def handle_back_to_date(callback: CallbackQuery, state: FSMContext):
     await state.set_state(BookingStates.choosing_date)
 
     fsm_data = await state.get_data()
-    year, month = get_current_month_year()
+    # Возвращаемся на месяц, который пользователь просматривал при выборе даты
+    year = fsm_data.get("cal_year") or get_current_month_year()[0]
+    month = fsm_data.get("cal_month") or get_current_month_year()[1]
     available_dates = await db.get_available_dates(year, month)
     calendar_markup = build_calendar(year, month, available_dates)
 
