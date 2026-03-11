@@ -1052,7 +1052,10 @@ async def handle_admin_booking_view(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text(
         text=await _render_booking_detail(booking),
-        reply_markup=get_admin_booking_actions_keyboard(booking_id, booking["status"]),
+        reply_markup=get_admin_booking_actions_keyboard(
+            booking_id, booking["status"],
+            back_cb=f"admin_bk_cal_date:{booking['booking_date']}",
+        ),
         parse_mode="HTML",
     )
 
@@ -1070,7 +1073,10 @@ async def handle_admin_booking_confirm(callback: CallbackQuery):
         if booking:
             await callback.message.edit_text(
                 text=await _render_booking_detail(booking),
-                reply_markup=get_admin_booking_actions_keyboard(booking_id, booking["status"]),
+                reply_markup=get_admin_booking_actions_keyboard(
+                    booking_id, booking["status"],
+                    back_cb=f"admin_bk_cal_date:{booking['booking_date']}",
+                ),
                 parse_mode="HTML",
             )
     else:
@@ -1097,7 +1103,10 @@ async def handle_admin_booking_cancel(callback: CallbackQuery):
         if booking:
             await callback.message.edit_text(
                 text=await _render_booking_detail(booking),
-                reply_markup=get_admin_booking_actions_keyboard(booking_id, booking["status"]),
+                reply_markup=get_admin_booking_actions_keyboard(
+                    booking_id, booking["status"],
+                    back_cb=f"admin_bk_cal_date:{booking['booking_date']}",
+                ),
                 parse_mode="HTML",
             )
     else:
@@ -1130,7 +1139,10 @@ async def handle_admin_booking_restore(callback: CallbackQuery):
         if booking:
             await callback.message.edit_text(
                 text=await _render_booking_detail(booking),
-                reply_markup=get_admin_booking_actions_keyboard(booking_id, booking["status"]),
+                reply_markup=get_admin_booking_actions_keyboard(
+                    booking_id, booking["status"],
+                    back_cb=f"admin_bk_cal_date:{booking['booking_date']}",
+                ),
                 parse_mode="HTML",
             )
 
