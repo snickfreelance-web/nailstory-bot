@@ -135,8 +135,24 @@ class AdminScheduleRuleStates(StatesGroup):
 
 class AdminScheduleEditStates(StatesGroup):
     """Редактирование существующего расписания: исключение дней и слотов."""
-    waiting_date = State()    # Выбор дня в календаре
-    editing_slots = State()   # Тогглы слотов выбранного дня
+    waiting_date = State()      # Выбор дня в календаре
+    editing_slots = State()     # Тогглы слотов выбранного дня
+    # Мини-генератор для пустого дня из редактора
+    day_waiting_start = State()    # Шаг 1: время начала (для одной даты)
+    day_waiting_end = State()      # Шаг 2: время окончания
+    day_waiting_interval = State() # Шаг 3: интервал
+
+
+# ===================================================
+# СОСТОЯНИЯ ADMIN-ПАНЕЛИ — СТАНДАРТНОЕ РАСПИСАНИЕ
+# ===================================================
+
+class AdminDefaultScheduleStates(StatesGroup):
+    """4-шаговый мастер задания стандартного расписания."""
+    waiting_weekdays = State()    # Шаг 1: дни недели (тогглы)
+    waiting_start_time = State()  # Шаг 2: время начала
+    waiting_end_time = State()    # Шаг 3: время окончания
+    waiting_interval = State()    # Шаг 4: интервал (15/30/60 мин)
 
 
 # ===================================================

@@ -929,3 +929,179 @@ async def get_survey_by_booking_id(booking_id: str) -> Optional[Dict]:
     except Exception as e:
         # single() бросает исключение если строк нет — это нормально
         return None
+
+
+# ===================================================
+# СТАНДАРТНОЕ РАСПИСАНИЕ
+# ===================================================
+
+async def get_default_schedule() -> Optional[Dict]:
+    """
+    Возвращает стандартное расписание или None если не задано.
+    Поля: weekdays_mask, start_hour, end_hour, interval_min, updated_at
+    """
+    try:
+        response = (
+            supabase.table("default_schedule")
+            .select("*")
+            .eq("id", 1)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+    except Exception as e:
+        logger.error(f"Ошибка получения стандартного расписания: {e}")
+        return None
+
+
+async def save_default_schedule(
+    weekdays_mask: int,
+    start_hour: int,
+    end_hour: int,
+    interval_min: int,
+) -> bool:
+    """
+    Сохраняет (upsert) стандартное расписание.
+    Одна строка с id=1.
+    """
+    try:
+        supabase.table("default_schedule").upsert({
+            "id": 1,
+            "weekdays_mask": weekdays_mask,
+            "start_hour": start_hour,
+            "end_hour": end_hour,
+            "interval_min": interval_min,
+            "updated_at": datetime.utcnow().isoformat(),
+        }).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения стандартного расписания: {e}")
+        return False
+
+
+async def delete_default_schedule() -> bool:
+    """Удаляет стандартное расписание."""
+    try:
+        supabase.table("default_schedule").delete().eq("id", 1).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка удаления стандартного расписания: {e}")
+        return False
+
+
+async def get_custom_days() -> set:
+    """
+    Возвращает множество дат, отредактированных вручную (защищены от стандарта).
+    Формат: {"2024-03-05", "2024-03-12", ...}
+    """
+    try:
+        response = supabase.table("custom_days").select("date").execute()
+        return {row["date"] for row in (response.data or [])}
+    except Exception as e:
+        logger.error(f"Ошибка получения кастомных дней: {e}")
+        return set()
+
+
+async def add_custom_day(date_str: str) -> None:
+    """Помечает день как кастомный (защита от перезаписи стандартом)."""
+    try:
+        supabase.table("custom_days").upsert({"date": date_str}).execute()
+    except Exception as e:
+        logger.error(f"Ошибка добавления кастомного дня {date_str}: {e}")
+
+
+async def remove_custom_day(date_str: str) -> None:
+    """Снимает пометку кастомного дня."""
+    try:
+        supabase.table("custom_days").delete().eq("date", date_str).execute()
+    except Exception as e:
+        logger.error(f"Ошибка удаления кастомного дня {date_str}: {e}")
+
+
+def _get_dates_for_rule(
+    weekdays_mask: int,
+    start_date: date,
+    end_date: date,
+    custom_days: set,
+) -> List[str]:
+    """
+    Вспомогательная: возвращает список дат в диапазоне [start_date, end_date),
+    которые совпадают с weekdays_mask и не являются кастомными.
+    weekdays_mask: бит 0 = Пн, бит 6 = Вс (0b0000001 = только Пн)
+    """
+    result = []
+    current = start_date
+    while current < end_date:
+        weekday_bit = 1 << current.weekday()  # weekday(): 0=Mon, 6=Sun
+        if (weekdays_mask & weekday_bit) and current.isoformat() not in custom_days:
+            result.append(current.isoformat())
+        current += timedelta(days=1)
+    return result
+
+
+async def apply_default_schedule_for_months(months_ahead: int = 3) -> Dict:
+    """
+    Применяет стандартное расписание на N месяцев вперёд.
+    Пропускает кастомные дни и уже существующие слоты.
+    Возвращает {"created": N, "skipped": N} или {"error": "..."}.
+    """
+    rule = await get_default_schedule()
+    if not rule:
+        return {"error": "no_rule"}
+
+    today = date.today()
+    end_date = date(
+        today.year + (today.month + months_ahead - 1) // 12,
+        (today.month + months_ahead - 1) % 12 + 1,
+        1,
+    )
+
+    custom = await get_custom_days()
+    dates = _get_dates_for_rule(
+        rule["weekdays_mask"], today, end_date, custom
+    )
+    if not dates:
+        return {"created": 0, "skipped": 0}
+
+    return await bulk_create_slots(
+        dates,
+        f"{rule['start_hour']:02d}:00",
+        f"{rule['end_hour']:02d}:00",
+        rule["interval_min"],
+    )
+
+
+async def reset_default_schedule_slots() -> Dict:
+    """
+    При смене стандартного расписания:
+    1. Удаляет все свободные слоты в будущем, которые не в custom_days
+    2. Пересоздаёт по новому правилу на 3 месяца вперёд
+
+    Вызывается ПОСЛЕ save_default_schedule().
+    """
+    today = date.today()
+    custom = await get_custom_days()
+
+    # Удаляем некастомные будущие свободные слоты
+    try:
+        # Получаем все будущие свободные слоты
+        response = (
+            supabase.table("time_slots")
+            .select("id,slot_date")
+            .eq("is_available", True)
+            .gte("slot_date", today.isoformat())
+            .execute()
+        )
+        ids_to_delete = [
+            row["id"] for row in (response.data or [])
+            if row["slot_date"] not in custom
+        ]
+        if ids_to_delete:
+            batch_size = 100
+            for i in range(0, len(ids_to_delete), batch_size):
+                batch = ids_to_delete[i:i + batch_size]
+                supabase.table("time_slots").delete().in_("id", batch).execute()
+    except Exception as e:
+        logger.error(f"Ошибка удаления слотов при смене стандарта: {e}")
+
+    # Создаём слоты по новому правилу
+    return await apply_default_schedule_for_months(3)

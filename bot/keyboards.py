@@ -586,9 +586,10 @@ def get_admin_schedule_keyboard() -> InlineKeyboardMarkup:
     """
     builder = InlineKeyboardBuilder()
 
-    builder.button(text="➕ Добавить рабочий день", callback_data="admin_sched:add_day")
+    builder.button(text="⚙️ Стандартное расписание", callback_data="admin:default_schedule")
     builder.button(text="📅 Создать расписание на месяц", callback_data="admin:schedule_rule")
     builder.button(text="✏️ Редактировать расписание", callback_data="admin:schedule_edit")
+    builder.button(text="➕ Добавить рабочий день", callback_data="admin_sched:add_day")
     builder.button(text="📋 Просмотр дня", callback_data="admin_sched:view_day")
     builder.button(text="◀ Главное меню", callback_data="admin:main")
 
@@ -731,10 +732,17 @@ def get_delete_confirm_keyboard(booking_id: str) -> InlineKeyboardMarkup:
 WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 
-def get_weekday_keyboard(selected: set) -> InlineKeyboardMarkup:
+def get_weekday_keyboard(
+    selected: set,
+    cancel_cb: str = "admin:schedule",
+) -> InlineKeyboardMarkup:
     """
     Клавиатура выбора дней недели (мультивыбор).
     ✅ — выбран, ⬜ — не выбран.
+
+    Args:
+        selected: Множество индексов выбранных дней (0=Пн, 6=Вс)
+        cancel_cb: callback_data для кнопки «Отмена»
     """
     builder = InlineKeyboardBuilder()
     for i, name in enumerate(WEEKDAYS_RU):
@@ -743,7 +751,7 @@ def get_weekday_keyboard(selected: set) -> InlineKeyboardMarkup:
     builder.adjust(4, 3)
     builder.row(
         InlineKeyboardButton(text="✅ Готово →", callback_data="rule_wd_done"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="admin:schedule"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb),
     )
     return builder.as_markup()
 
