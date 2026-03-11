@@ -194,21 +194,27 @@ def build_admin_calendar(
     year: int,
     month: int,
     dates_with_slots: List[str],
+    nav_prefix: str = "admin_cal_nav",
+    date_prefix: str = "admin_cal_date",
 ) -> InlineKeyboardMarkup:
     """
-    Строит инлайн-клавиатуру выбора даты для админского флоу «Добавить рабочий день».
+    Строит инлайн-клавиатуру выбора даты для админских флоу.
 
-    Отличия от клиентского build_calendar():
-    - ВСЕ будущие даты кликабельны (администратор может добавить слоты на любой день)
+    Используется для:
+    - «Добавить рабочий день» (nav_prefix="admin_cal_nav", date_prefix="admin_cal_date")
+    - «Перенос бронирования» (nav_prefix="admin_rs_cal_nav", date_prefix="admin_rs_cal_date")
+
+    Особенности:
+    - ВСЕ будущие даты кликабельны
     - Даты с уже созданными слотами помечаются 📅
-    - Навигация: admin_cal_nav:YYYY:M  (не cal_nav:)
-    - Выбор даты: admin_cal_date:YYYY-MM-DD  (не cal_date:)
-    - Нет заглушки «нет дат» — в отличие от клиентского календаря
+    - Нет заглушки «нет дат»
 
     Args:
         year: Год для отображения
         month: Месяц 1-12
-        dates_with_slots: Даты, на которые уже созданы слоты (маркер 📅)
+        dates_with_slots: Даты, отмеченные маркером 📅
+        nav_prefix: Префикс callback для навигации по месяцам
+        date_prefix: Префикс callback для выбора дня
 
     Returns:
         InlineKeyboardMarkup — готовая клавиатура
@@ -226,10 +232,10 @@ def build_admin_calendar(
     if is_current_or_past_month:
         builder.button(text=" ", callback_data="cal_ignore")
     else:
-        builder.button(text="◀", callback_data=f"admin_cal_nav:{prev_year}:{prev_month}")
+        builder.button(text="◀", callback_data=f"{nav_prefix}:{prev_year}:{prev_month}")
 
     builder.button(text=f"{MONTHS_RU[month]} {year}", callback_data="cal_ignore")
-    builder.button(text="▶", callback_data=f"admin_cal_nav:{next_year}:{next_month}")
+    builder.button(text="▶", callback_data=f"{nav_prefix}:{next_year}:{next_month}")
     builder.adjust(3)
 
     # Строка 2: заголовки дней недели
@@ -250,9 +256,9 @@ def build_admin_calendar(
                 if is_past:
                     builder.button(text=str(day_num), callback_data="cal_ignore")
                 elif day_str in dates_with_slots:
-                    builder.button(text=f"📅{day_num}", callback_data=f"admin_cal_date:{day_str}")
+                    builder.button(text=f"📅{day_num}", callback_data=f"{date_prefix}:{day_str}")
                 else:
-                    builder.button(text=str(day_num), callback_data=f"admin_cal_date:{day_str}")
+                    builder.button(text=str(day_num), callback_data=f"{date_prefix}:{day_str}")
 
     row_widths = [3, 7] + [7] * len(month_calendar)
     builder.adjust(*row_widths)

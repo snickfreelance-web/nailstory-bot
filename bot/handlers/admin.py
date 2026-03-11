@@ -5,7 +5,7 @@
 import logging
 from datetime import date
 from aiogram import Router, F, BaseMiddleware
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, TelegramObject
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -1154,81 +1154,126 @@ async def handle_admin_reschedule_start(callback: CallbackQuery, state: FSMConte
         await callback.answer("Бронирование не найдено", show_alert=True)
         return
 
+    old_slot = await db.get_slot_by_date_time(booking["booking_date"], booking["booking_time"])
+
     await state.set_state(AdminRescheduleStates.waiting_new_date)
     await state.update_data(
         reschedule_booking_id=booking_id,
         reschedule_old_date=booking["booking_date"],
         reschedule_old_time=booking["booking_time"],
+        reschedule_old_slot_id=old_slot["id"] if old_slot else None,
     )
 
-    old_slot = await db.get_slot_by_date_time(booking["booking_date"], booking["booking_time"])
-    if old_slot:
-        await state.update_data(reschedule_old_slot_id=old_slot["id"])
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text="❌ Отмена", callback_data=f"admin_bk_view:{booking_id}")
+    year, month = get_current_month_year()
+    dates_with_slots = await db.get_dates_with_available_slots(year, month)
 
     await callback.message.edit_text(
         text=(
             f"📅 <b>Перенос бронирования</b>\n\n"
             f"Клиент: {booking['full_name']}\n"
-            f"Текущая дата: {format_date_ru(booking['booking_date'])}, {format_time_ru(booking['booking_time'])}\n\n"
-            "Введите <b>новую дату</b> для переноса:\n"
-            "<i>Формат: ДД.ММ.ГГГГ (например, 20.03.2024)</i>"
+            f"Текущая дата: {format_date_ru(booking['booking_date'])}, "
+            f"{format_time_ru(booking['booking_time'])}\n\n"
+            "Выберите <b>новую дату</b>:\n"
+            "<i>📅 — есть свободные слоты</i>"
         ),
-        reply_markup=builder.as_markup(),
+        reply_markup=build_admin_calendar(
+            year, month, dates_with_slots,
+            nav_prefix="admin_rs_cal_nav",
+            date_prefix="admin_rs_cal_date",
+        ),
         parse_mode="HTML",
     )
 
 
-# ФИX #2: добавлен F.text
-@router.message(AdminRescheduleStates.waiting_new_date, F.text)
-async def handle_admin_reschedule_date(message: Message, state: FSMContext):
-    parsed = parse_date(message.text.strip())
+@router.callback_query(AdminRescheduleStates.waiting_new_date, F.data.startswith("admin_rs_cal_nav:"))
+async def handle_admin_rs_cal_nav(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    _, year_str, month_str = callback.data.split(":")
+    year, month = int(year_str), int(month_str)
 
-    if not parsed:
-        await message.answer(
-            "❌ Некорректная дата или дата в прошлом.\n"
-            "Введите дату в формате <code>ДД.ММ.ГГГГ</code>, например: <code>20.03.2024</code>",
-            parse_mode="HTML",
-        )
-        return
+    fsm_data = await state.get_data()
+    booking = await db.get_booking_by_id(fsm_data["reschedule_booking_id"])
 
-    year, month, day, date_obj = parsed
-    date_str = date_obj.strftime("%Y-%m-%d")
+    dates_with_slots = await db.get_dates_with_available_slots(year, month)
+
+    await callback.message.edit_text(
+        text=(
+            f"📅 <b>Перенос бронирования</b>\n\n"
+            f"Клиент: {booking['full_name']}\n"
+            f"Текущая дата: {format_date_ru(booking['booking_date'])}, "
+            f"{format_time_ru(booking['booking_time'])}\n\n"
+            "Выберите <b>новую дату</b>:\n"
+            "<i>📅 — есть свободные слоты</i>"
+        ),
+        reply_markup=build_admin_calendar(
+            year, month, dates_with_slots,
+            nav_prefix="admin_rs_cal_nav",
+            date_prefix="admin_rs_cal_date",
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(
+    StateFilter(AdminRescheduleStates.waiting_new_date, AdminRescheduleStates.waiting_confirm),
+    F.data.startswith("admin_rs_cal_date:"),
+)
+async def handle_admin_rs_cal_date(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
 
     slots = await db.get_available_slots(date_str)
 
     if not slots:
-        await message.answer(
-            f"😔 На {format_date_ru(date_str)} нет свободных слотов.\n"
-            "Введите другую дату или добавьте слоты в разделе 'Расписание'."
+        await callback.answer(
+            f"На {format_date_ru(date_str)} нет свободных слотов. Выберите другую дату.",
+            show_alert=True,
         )
         return
 
     await state.update_data(reschedule_new_date=date_str)
     await state.set_state(AdminRescheduleStates.waiting_new_time)
 
-    time_keyboard = build_time_slots_keyboard(slots)
-
-    await message.answer(
+    await callback.message.edit_text(
         text=f"📅 Новая дата: <b>{format_date_ru(date_str)}</b>\n\n🕐 Выберите новое время:",
-        reply_markup=time_keyboard,
+        reply_markup=build_time_slots_keyboard(slots),
         parse_mode="HTML",
     )
 
 
-# Catch-хендлер для нетекстовых сообщений
-@router.message(AdminRescheduleStates.waiting_new_date)
-async def handle_admin_reschedule_date_invalid(message: Message):
-    await message.answer(
-        "❌ Введите дату текстом в формате <code>ДД.ММ.ГГГГ</code>",
+@router.callback_query(AdminRescheduleStates.waiting_new_time, F.data == "back_to_date")
+async def handle_admin_rs_back_to_calendar(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору даты из выбора времени при переносе."""
+    await callback.answer()
+    fsm_data = await state.get_data()
+    booking = await db.get_booking_by_id(fsm_data["reschedule_booking_id"])
+
+    await state.set_state(AdminRescheduleStates.waiting_new_date)
+
+    year, month = get_current_month_year()
+    dates_with_slots = await db.get_dates_with_available_slots(year, month)
+
+    await callback.message.edit_text(
+        text=(
+            f"📅 <b>Перенос бронирования</b>\n\n"
+            f"Клиент: {booking['full_name']}\n"
+            f"Текущая дата: {format_date_ru(booking['booking_date'])}, "
+            f"{format_time_ru(booking['booking_time'])}\n\n"
+            "Выберите <b>новую дату</b>:\n"
+            "<i>📅 — есть свободные слоты</i>"
+        ),
+        reply_markup=build_admin_calendar(
+            year, month, dates_with_slots,
+            nav_prefix="admin_rs_cal_nav",
+            date_prefix="admin_rs_cal_date",
+        ),
         parse_mode="HTML",
     )
 
 
 @router.callback_query(AdminRescheduleStates.waiting_new_time, F.data.startswith("slot:"))
 async def handle_admin_reschedule_time(callback: CallbackQuery, state: FSMContext):
+    """Выбрано время — показываем экран подтверждения переноса."""
     await callback.answer()
 
     parts = callback.data.split(":")
@@ -1236,18 +1281,56 @@ async def handle_admin_reschedule_time(callback: CallbackQuery, state: FSMContex
     new_time = f"{parts[2]}:{parts[3]}:00"
 
     fsm_data = await state.get_data()
+    await state.update_data(reschedule_new_slot_id=new_slot_id, reschedule_new_time=new_time)
+    await state.set_state(AdminRescheduleStates.waiting_confirm)
+
+    booking = await db.get_booking_by_id(fsm_data["reschedule_booking_id"])
+    new_date = fsm_data["reschedule_new_date"]
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, перенести", callback_data="admin_rs_confirm")
+    builder.button(
+        text="← Нет, назад к выбору времени",
+        callback_data=f"admin_rs_cal_date:{new_date}",
+    )
+    builder.adjust(1)
+
+    await callback.message.edit_text(
+        text=(
+            "📅 <b>Подтвердите перенос</b>\n\n"
+            f"Клиент: {booking['full_name']}\n"
+            f"Было: {format_date_ru(booking['booking_date'])}, "
+            f"{format_time_ru(booking['booking_time'])}\n"
+            f"Станет: <b>{format_date_ru(new_date)}, {format_time_ru(new_time)}</b>\n\n"
+            "Это действие нельзя отменить. Запись будет перенесена, "
+            "старый слот освободится и станет доступен для записи."
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminRescheduleStates.waiting_confirm, F.data == "admin_rs_confirm")
+async def handle_admin_reschedule_confirm(callback: CallbackQuery, state: FSMContext):
+    """Выполняет фактический перенос после подтверждения."""
+    await callback.answer()
+
+    fsm_data = await state.get_data()
     await state.clear()
 
     success = await db.reschedule_booking(
         booking_id=fsm_data["reschedule_booking_id"],
-        old_slot_id=fsm_data.get("reschedule_old_slot_id", ""),
-        new_slot_id=new_slot_id,
+        old_slot_id=fsm_data.get("reschedule_old_slot_id") or "",
+        new_slot_id=fsm_data["reschedule_new_slot_id"],
         new_date=fsm_data["reschedule_new_date"],
-        new_time=new_time,
+        new_time=fsm_data["reschedule_new_time"],
     )
 
     builder = InlineKeyboardBuilder()
-    builder.button(text="📋 К бронированию", callback_data=f"admin_bk_view:{fsm_data['reschedule_booking_id']}")
+    builder.button(
+        text="📋 К бронированию",
+        callback_data=f"admin_bk_view:{fsm_data['reschedule_booking_id']}",
+    )
     builder.button(text="◀ Меню", callback_data="admin:main")
     builder.adjust(1)
 
@@ -1256,7 +1339,7 @@ async def handle_admin_reschedule_time(callback: CallbackQuery, state: FSMContex
             text=(
                 "✅ <b>Бронирование перенесено!</b>\n\n"
                 f"Новая дата: <b>{format_date_ru(fsm_data['reschedule_new_date'])}</b>\n"
-                f"Новое время: <b>{new_time[:5]}</b>"
+                f"Новое время: <b>{fsm_data['reschedule_new_time'][:5]}</b>"
             ),
             reply_markup=builder.as_markup(),
             parse_mode="HTML",
