@@ -3,6 +3,7 @@
 # ===================================================
 
 import logging
+import calendar as cal_module
 from datetime import date
 from aiogram import Router, F, BaseMiddleware
 from aiogram.filters import Command, StateFilter
@@ -12,7 +13,11 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from typing import Callable, Dict, Any, Awaitable, Optional, Set
 
 from bot.config import settings
-from bot.states import AdminServiceStates, AdminSlotStates, AdminRescheduleStates, AdminBookingStates, AdminMgmtStates
+from bot.states import (
+    AdminServiceStates, AdminSlotStates, AdminRescheduleStates,
+    AdminBookingStates, AdminMgmtStates,
+    AdminScheduleRuleStates, AdminScheduleEditStates,
+)
 from bot.keyboards import (
     get_admin_main_keyboard,
     get_admin_services_keyboard,
@@ -28,6 +33,9 @@ from bot.keyboards import (
     get_admin_slots_list_keyboard,
     get_admin_admins_keyboard,
     get_admin_transfer_keyboard,
+    get_weekday_keyboard,
+    get_hour_keyboard,
+    get_slot_edit_keyboard,
 )
 from bot.utils.validators import (
     format_date_ru,
@@ -38,7 +46,10 @@ from bot.utils.validators import (
     is_valid_phone,
     normalize_phone,
 )
-from bot.utils.calendar import build_time_slots_keyboard, build_admin_calendar, build_admin_bookings_calendar, get_current_month_year
+from bot.utils.calendar import (
+    build_time_slots_keyboard, build_admin_calendar,
+    build_admin_bookings_calendar, get_current_month_year, MONTHS_RU,
+)
 from bot import database as db
 
 logger = logging.getLogger(__name__)
@@ -2168,3 +2179,787 @@ async def handle_admin_mgmt_confirm_transfer(callback: CallbackQuery, state: FSM
             "❌ Не удалось передать владение. Попробуйте ещё раз.",
             reply_markup=builder.as_markup(),
         )
+
+
+# ===================================================
+# 10. ГЕНЕРАТОР РАСПИСАНИЯ ПО ПРАВИЛУ
+# ===================================================
+
+@router.callback_query(F.data == "admin:schedule_rule")
+async def handle_admin_schedule_rule(callback: CallbackQuery, state: FSMContext):
+    """Точка входа. Шаг 1 — выбор дней недели."""
+    await callback.answer()
+    await state.set_state(AdminScheduleRuleStates.waiting_weekdays)
+    await state.update_data(rule_weekdays=[])
+
+    await callback.message.edit_text(
+        text=(
+            "📅 <b>Создать расписание на месяц</b>\n\n"
+            "Шаг 1 из 4 — Выберите <b>рабочие дни</b>:\n"
+            "<i>Нажмите на день, чтобы выбрать/снять выбор</i>"
+        ),
+        reply_markup=get_weekday_keyboard(set()),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminScheduleRuleStates.waiting_weekdays, F.data.startswith("rule_wd:"))
+async def handle_weekday_toggle(callback: CallbackQuery, state: FSMContext):
+    """Переключить выбранный день недели."""
+    await callback.answer()
+    wd = int(callback.data.split(":")[1])
+    fsm = await state.get_data()
+    selected = set(fsm.get("rule_weekdays", []))
+    if wd in selected:
+        selected.discard(wd)
+    else:
+        selected.add(wd)
+    await state.update_data(rule_weekdays=list(selected))
+    await callback.message.edit_reply_markup(reply_markup=get_weekday_keyboard(selected))
+
+
+@router.callback_query(AdminScheduleRuleStates.waiting_weekdays, F.data == "rule_wd_done")
+async def handle_weekday_done(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение дней, шаг 2 — выбор времени начала."""
+    fsm = await state.get_data()
+    selected = set(fsm.get("rule_weekdays", []))
+    if not selected:
+        await callback.answer("Выберите хотя бы один день!", show_alert=True)
+        return
+    await callback.answer()
+    await state.set_state(AdminScheduleRuleStates.waiting_start_time)
+
+    await callback.message.edit_text(
+        text=(
+            "📅 <b>Создать расписание на месяц</b>\n\n"
+            "Шаг 2 из 4 — Выберите <b>время начала</b> рабочего дня:"
+        ),
+        reply_markup=get_hour_keyboard(list(range(7, 21)), "rule_start", "admin:schedule_rule"),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminScheduleRuleStates.waiting_start_time, F.data.startswith("rule_start:"))
+async def handle_rule_start_time(callback: CallbackQuery, state: FSMContext):
+    """Записать время начала, шаг 3 — время окончания."""
+    await callback.answer()
+    hour = int(callback.data.split(":")[1])
+    await state.update_data(rule_start_hour=hour)
+    await state.set_state(AdminScheduleRuleStates.waiting_end_time)
+
+    await callback.message.edit_text(
+        text=(
+            "📅 <b>Создать расписание на месяц</b>\n\n"
+            f"Начало: <b>{hour:02d}:00</b>\n\n"
+            "Шаг 3 из 4 — Выберите <b>время окончания</b> рабочего дня:"
+        ),
+        reply_markup=get_hour_keyboard(list(range(hour + 1, 24)), "rule_end", "admin:schedule_rule"),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminScheduleRuleStates.waiting_end_time, F.data.startswith("rule_end:"))
+async def handle_rule_end_time(callback: CallbackQuery, state: FSMContext):
+    """Записать время окончания, шаг 4 — выбор интервала."""
+    await callback.answer()
+    hour = int(callback.data.split(":")[1])
+    await state.update_data(rule_end_hour=hour)
+    await state.set_state(AdminScheduleRuleStates.waiting_interval)
+
+    fsm = await state.get_data()
+    start_hour = fsm["rule_start_hour"]
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⏱ 15 минут", callback_data="rule_interval:15")
+    builder.button(text="⏱ 30 минут", callback_data="rule_interval:30")
+    builder.button(text="⏱ 1 час", callback_data="rule_interval:60")
+    builder.adjust(3)
+    builder.row(InlineKeyboardButton(text="← Назад", callback_data="admin:schedule_rule"))
+
+    await callback.message.edit_text(
+        text=(
+            "📅 <b>Создать расписание на месяц</b>\n\n"
+            f"Начало: <b>{start_hour:02d}:00</b> — Конец: <b>{hour:02d}:00</b>\n\n"
+            "Шаг 4 из 4 — Выберите <b>интервал</b> между записями:"
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminScheduleRuleStates.waiting_interval, F.data.startswith("rule_interval:"))
+async def handle_rule_interval(callback: CallbackQuery, state: FSMContext):
+    """Запускает генерацию слотов и показывает результат."""
+    await callback.answer()
+    interval_min = int(callback.data.split(":")[1])
+    fsm = await state.get_data()
+    await state.clear()
+
+    today = date.today()
+    year, month = today.year, today.month
+    last_day = cal_module.monthrange(year, month)[1]
+
+    weekdays = set(fsm.get("rule_weekdays", []))
+    start_hour = fsm["rule_start_hour"]
+    end_hour = fsm["rule_end_hour"]
+
+    dates = [
+        date(year, month, d).strftime("%Y-%m-%d")
+        for d in range(today.day, last_day + 1)
+        if date(year, month, d).weekday() in weekdays
+    ]
+
+    if not dates:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="← Расписание", callback_data="admin:schedule")
+        await callback.message.edit_text(
+            "😔 В оставшейся части месяца нет подходящих рабочих дней.\n"
+            "Попробуйте выбрать другие дни недели.",
+            reply_markup=builder.as_markup(),
+        )
+        return
+
+    result = await db.bulk_create_slots(
+        dates,
+        f"{start_hour:02d}:00",
+        f"{end_hour:02d}:00",
+        interval_min,
+    )
+    created = result["created"]
+    skipped = result["skipped"]
+
+    next_month = month + 1 if month < 12 else 1
+    next_year = year if month < 12 else year + 1
+    wd_mask = sum(1 << w for w in weekdays)
+    next_cb = f"rule_next:{next_year}:{next_month}:{wd_mask}:{start_hour}:{end_hour}:{interval_min}"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Посмотреть расписание", callback_data="admin:schedule")
+    builder.button(text=f"📅 Создать на {MONTHS_RU[next_month]}", callback_data=next_cb)
+    builder.adjust(1)
+
+    skip_text = f"\nПропущено <b>{skipped}</b> (уже существовали)" if skipped else ""
+    await callback.message.edit_text(
+        text=(
+            f"✅ <b>Расписание создано!</b>\n\n"
+            f"Создано <b>{created}</b> слотов на <b>{len(dates)}</b> рабочих дней.{skip_text}\n\n"
+            f"<i>Интервал {interval_min} мин · {start_hour:02d}:00 — {end_hour:02d}:00</i>"
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("rule_next:"))
+async def handle_rule_next_month(callback: CallbackQuery, state: FSMContext):
+    """Создаёт расписание по тому же правилу на следующий месяц."""
+    await callback.answer()
+    parts = callback.data.split(":")
+    next_year = int(parts[1])
+    next_month = int(parts[2])
+    wd_mask = int(parts[3])
+    start_hour = int(parts[4])
+    end_hour = int(parts[5])
+    interval_min = int(parts[6])
+
+    weekdays = {i for i in range(7) if wd_mask & (1 << i)}
+    last_day = cal_module.monthrange(next_year, next_month)[1]
+
+    dates = [
+        date(next_year, next_month, d).strftime("%Y-%m-%d")
+        for d in range(1, last_day + 1)
+        if date(next_year, next_month, d).weekday() in weekdays
+    ]
+
+    result = await db.bulk_create_slots(
+        dates,
+        f"{start_hour:02d}:00",
+        f"{end_hour:02d}:00",
+        interval_min,
+    )
+    created = result["created"]
+    skipped = result["skipped"]
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Посмотреть расписание", callback_data="admin:schedule")
+    builder.adjust(1)
+
+    skip_text = f"\nПропущено <b>{skipped}</b> (уже существовали)" if skipped else ""
+    await callback.message.edit_text(
+        text=(
+            f"✅ <b>Расписание на {MONTHS_RU[next_month]} создано!</b>\n\n"
+            f"Создано <b>{created}</b> слотов на <b>{len(dates)}</b> рабочих дней.{skip_text}\n\n"
+            f"<i>Интервал {interval_min} мин · {start_hour:02d}:00 — {end_hour:02d}:00</i>"
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+# ===================================================
+# 11. РЕДАКТОР РАСПИСАНИЯ
+# ===================================================
+
+async def _show_schedule_edit_calendar(message, year: int, month: int, edit: bool = True):
+    """Вспомогательная функция: показывает календарь редактора."""
+    dates_with_slots = await db.get_dates_with_any_slots(year, month)
+    kb = build_admin_calendar(
+        year, month, dates_with_slots,
+        nav_prefix="admin_ed_cal_nav",
+        date_prefix="admin_ed_cal_date",
+    )
+    text = (
+        "✏️ <b>Редактировать расписание</b>\n\n"
+        "Выберите день для редактирования:\n"
+        "<i>📅 — есть слоты</i>"
+    )
+    if edit:
+        await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:schedule_edit")
+async def handle_admin_schedule_edit(callback: CallbackQuery, state: FSMContext):
+    """Точка входа в редактор расписания."""
+    await callback.answer()
+    await state.clear()
+    await state.set_state(AdminScheduleEditStates.waiting_date)
+    year, month = get_current_month_year()
+    await _show_schedule_edit_calendar(callback.message, year, month)
+
+
+@router.callback_query(
+    StateFilter(AdminScheduleEditStates.waiting_date, AdminScheduleEditStates.editing_slots),
+    F.data.startswith("admin_ed_cal_nav:"),
+)
+async def handle_admin_ed_cal_nav(callback: CallbackQuery, state: FSMContext):
+    """Навигация по месяцам в редакторе."""
+    await callback.answer()
+    _, year_str, month_str = callback.data.split(":")
+    await state.set_state(AdminScheduleEditStates.waiting_date)
+    await _show_schedule_edit_calendar(callback.message, int(year_str), int(month_str))
+
+
+@router.callback_query(
+    StateFilter(AdminScheduleEditStates.waiting_date, AdminScheduleEditStates.editing_slots),
+    F.data.startswith("admin_ed_cal_date:"),
+)
+async def handle_admin_ed_cal_date(callback: CallbackQuery, state: FSMContext):
+    """Дата выбрана — показываем тогглы слотов."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+
+    slots = await db.get_all_slots_for_date(date_str)
+    if not slots:
+        await callback.answer("На этот день слотов нет.", show_alert=True)
+        return
+
+    await state.set_state(AdminScheduleEditStates.editing_slots)
+    await state.update_data(edit_date=date_str, removed_ids=[])
+
+    booked_count = sum(1 for s in slots if not s["is_available"])
+    await callback.message.edit_text(
+        text=(
+            f"✏️ <b>Редактирование: {format_date_ru(date_str)}</b>\n\n"
+            f"Слотов: {len(slots)} · Занято: {booked_count}\n\n"
+            "✅ — активен  ❌ — будет удалён  🔒 — занят (нельзя удалить)\n"
+            "<i>Нажмите на слот, чтобы пометить его для удаления</i>"
+        ),
+        reply_markup=get_slot_edit_keyboard(slots, set(), date_str),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminScheduleEditStates.editing_slots, F.data.startswith("edit_slot_toggle:"))
+async def handle_edit_slot_toggle(callback: CallbackQuery, state: FSMContext):
+    """Переключить пометку слота для удаления."""
+    await callback.answer()
+    slot_id = callback.data.split(":", 1)[1]
+    fsm = await state.get_data()
+    removed_ids = set(fsm.get("removed_ids", []))
+    date_str = fsm["edit_date"]
+
+    if slot_id in removed_ids:
+        removed_ids.discard(slot_id)
+    else:
+        removed_ids.add(slot_id)
+    await state.update_data(removed_ids=list(removed_ids))
+
+    slots = await db.get_all_slots_for_date(date_str)
+    await callback.message.edit_reply_markup(
+        reply_markup=get_slot_edit_keyboard(slots, removed_ids, date_str)
+    )
+
+
+@router.callback_query(AdminScheduleEditStates.editing_slots, F.data == "edit_slot_save")
+async def handle_edit_slot_save(callback: CallbackQuery, state: FSMContext):
+    """Применить изменения: удалить помеченные слоты из БД."""
+    await callback.answer()
+    fsm = await state.get_data()
+    removed_ids = set(fsm.get("removed_ids", []))
+    date_str = fsm["edit_date"]
+
+    if not removed_ids:
+        await callback.answer("Нет помеченных слотов для удаления.", show_alert=True)
+        return
+
+    deleted = 0
+    for slot_id in removed_ids:
+        if await db.delete_slot_by_id(slot_id):
+            deleted += 1
+
+    await state.update_data(removed_ids=[])
+    slots = await db.get_all_slots_for_date(date_str)
+
+    if slots:
+        await callback.message.edit_text(
+            text=(
+                f"✅ Удалено слотов: <b>{deleted}</b>\n\n"
+                f"✏️ <b>Редактирование: {format_date_ru(date_str)}</b>\n\n"
+                "✅ — активен  🔒 — занят (нельзя удалить)"
+            ),
+            reply_markup=get_slot_edit_keyboard(slots, set(), date_str),
+            parse_mode="HTML",
+        )
+    else:
+        await state.set_state(AdminScheduleEditStates.waiting_date)
+        year, month = int(date_str[:4]), int(date_str[5:7])
+        await callback.answer(f"День {format_date_ru(date_str)} теперь пуст.", show_alert=True)
+        await _show_schedule_edit_calendar(callback.message, year, month)
+
+
+@router.callback_query(AdminScheduleEditStates.editing_slots, F.data.startswith("edit_day_delete:"))
+async def handle_edit_day_delete_prompt(callback: CallbackQuery):
+    """Запрос подтверждения удаления всего дня."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, удалить весь день", callback_data=f"edit_day_confirm:{date_str}")
+    builder.button(text="← Нет, назад", callback_data=f"admin_ed_cal_date:{date_str}")
+    builder.adjust(1)
+
+    await callback.message.edit_text(
+        text=(
+            f"⚠️ <b>Удалить все слоты за {format_date_ru(date_str)}?</b>\n\n"
+            "Занятые бронированиями слоты не будут удалены.\n"
+            "Это действие нельзя отменить."
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("edit_day_confirm:"))
+async def handle_edit_day_confirm(callback: CallbackQuery, state: FSMContext):
+    """Выполняет удаление всех свободных слотов дня."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+    deleted = await db.delete_slots_for_date(date_str)
+
+    year, month = int(date_str[:4]), int(date_str[5:7])
+    await state.set_state(AdminScheduleEditStates.waiting_date)
+    await callback.answer(
+        f"Удалено {deleted} слотов за {format_date_ru(date_str)}.",
+        show_alert=True,
+    )
+    await _show_schedule_edit_calendar(callback.message, year, month)
+
+
+@router.callback_query(AdminScheduleEditStates.editing_slots, F.data == "edit_slot_ignore")
+async def handle_edit_slot_ignore(callback: CallbackQuery):
+    """Заглушка для нажатия на занятый слот."""
+    await callback.answer("Этот слот занят бронированием и не может быть удалён.")
+
+
+# ===================================================
+# 10. ГЕНЕРАТОР РАСПИСАНИЯ ПО ПРАВИЛУ
+# ===================================================
+
+@router.callback_query(F.data == "admin:schedule_rule")
+async def handle_admin_schedule_rule(callback: CallbackQuery, state: FSMContext):
+    """Точка входа. Шаг 1 — выбор дней недели."""
+    await callback.answer()
+    await state.set_state(AdminScheduleRuleStates.waiting_weekdays)
+    await state.update_data(rule_weekdays=[])
+
+    await callback.message.edit_text(
+        text=(
+            "📅 <b>Создать расписание на месяц</b>\n\n"
+            "Шаг 1 из 4 — Выберите <b>рабочие дни</b>:\n"
+            "<i>Нажмите на день, чтобы выбрать/снять выбор</i>"
+        ),
+        reply_markup=get_weekday_keyboard(set()),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminScheduleRuleStates.waiting_weekdays, F.data.startswith("rule_wd:"))
+async def handle_weekday_toggle(callback: CallbackQuery, state: FSMContext):
+    """Переключить выбранный день недели."""
+    await callback.answer()
+    wd = int(callback.data.split(":")[1])
+    fsm = await state.get_data()
+    selected = set(fsm.get("rule_weekdays", []))
+    if wd in selected:
+        selected.discard(wd)
+    else:
+        selected.add(wd)
+    await state.update_data(rule_weekdays=list(selected))
+    await callback.message.edit_reply_markup(reply_markup=get_weekday_keyboard(selected))
+
+
+@router.callback_query(AdminScheduleRuleStates.waiting_weekdays, F.data == "rule_wd_done")
+async def handle_weekday_done(callback: CallbackQuery, state: FSMContext):
+    """Подтверждение дней, шаг 2 — выбор времени начала."""
+    fsm = await state.get_data()
+    selected = set(fsm.get("rule_weekdays", []))
+    if not selected:
+        await callback.answer("Выберите хотя бы один день!", show_alert=True)
+        return
+    await callback.answer()
+    await state.set_state(AdminScheduleRuleStates.waiting_start_time)
+
+    await callback.message.edit_text(
+        text=(
+            "📅 <b>Создать расписание на месяц</b>\n\n"
+            "Шаг 2 из 4 — Выберите <b>время начала</b> рабочего дня:"
+        ),
+        reply_markup=get_hour_keyboard(list(range(7, 21)), "rule_start", "admin:schedule_rule"),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminScheduleRuleStates.waiting_start_time, F.data.startswith("rule_start:"))
+async def handle_rule_start_time(callback: CallbackQuery, state: FSMContext):
+    """Записать время начала, шаг 3 — время окончания."""
+    await callback.answer()
+    hour = int(callback.data.split(":")[1])
+    await state.update_data(rule_start_hour=hour)
+    await state.set_state(AdminScheduleRuleStates.waiting_end_time)
+
+    await callback.message.edit_text(
+        text=(
+            "📅 <b>Создать расписание на месяц</b>\n\n"
+            f"Начало: <b>{hour:02d}:00</b>\n\n"
+            "Шаг 3 из 4 — Выберите <b>время окончания</b> рабочего дня:"
+        ),
+        reply_markup=get_hour_keyboard(list(range(hour + 1, 24)), "rule_end", "admin:schedule_rule"),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminScheduleRuleStates.waiting_end_time, F.data.startswith("rule_end:"))
+async def handle_rule_end_time(callback: CallbackQuery, state: FSMContext):
+    """Записать время окончания, шаг 4 — выбор интервала."""
+    await callback.answer()
+    hour = int(callback.data.split(":")[1])
+    await state.update_data(rule_end_hour=hour)
+    await state.set_state(AdminScheduleRuleStates.waiting_interval)
+
+    fsm = await state.get_data()
+    start_hour = fsm["rule_start_hour"]
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⏱ 15 минут", callback_data="rule_interval:15")
+    builder.button(text="⏱ 30 минут", callback_data="rule_interval:30")
+    builder.button(text="⏱ 1 час", callback_data="rule_interval:60")
+    builder.adjust(3)
+    builder.row(InlineKeyboardButton(text="← Назад", callback_data="admin:schedule_rule"))
+
+    await callback.message.edit_text(
+        text=(
+            "📅 <b>Создать расписание на месяц</b>\n\n"
+            f"Начало: <b>{start_hour:02d}:00</b> — Конец: <b>{hour:02d}:00</b>\n\n"
+            "Шаг 4 из 4 — Выберите <b>интервал</b> между записями:"
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminScheduleRuleStates.waiting_interval, F.data.startswith("rule_interval:"))
+async def handle_rule_interval(callback: CallbackQuery, state: FSMContext):
+    """Запускает генерацию слотов и показывает результат."""
+    await callback.answer()
+    interval_min = int(callback.data.split(":")[1])
+    fsm = await state.get_data()
+    await state.clear()
+
+    today = date.today()
+    year, month = today.year, today.month
+    last_day = cal_module.monthrange(year, month)[1]
+
+    weekdays = set(fsm.get("rule_weekdays", []))
+    start_hour = fsm["rule_start_hour"]
+    end_hour = fsm["rule_end_hour"]
+
+    dates = [
+        date(year, month, d).strftime("%Y-%m-%d")
+        for d in range(today.day, last_day + 1)
+        if date(year, month, d).weekday() in weekdays
+    ]
+
+    if not dates:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="← Расписание", callback_data="admin:schedule")
+        await callback.message.edit_text(
+            "😔 В оставшейся части месяца нет подходящих рабочих дней.\n"
+            "Попробуйте выбрать другие дни недели.",
+            reply_markup=builder.as_markup(),
+        )
+        return
+
+    result = await db.bulk_create_slots(
+        dates,
+        f"{start_hour:02d}:00",
+        f"{end_hour:02d}:00",
+        interval_min,
+    )
+    created = result["created"]
+    skipped = result["skipped"]
+
+    next_month = month + 1 if month < 12 else 1
+    next_year = year if month < 12 else year + 1
+    wd_mask = sum(1 << w for w in weekdays)
+    next_cb = f"rule_next:{next_year}:{next_month}:{wd_mask}:{start_hour}:{end_hour}:{interval_min}"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Посмотреть расписание", callback_data="admin:schedule")
+    builder.button(text=f"📅 Создать на {MONTHS_RU[next_month]}", callback_data=next_cb)
+    builder.adjust(1)
+
+    skip_text = f"\nПропущено <b>{skipped}</b> (уже существовали)" if skipped else ""
+    await callback.message.edit_text(
+        text=(
+            f"✅ <b>Расписание создано!</b>\n\n"
+            f"Создано <b>{created}</b> слотов на <b>{len(dates)}</b> рабочих дней.{skip_text}\n\n"
+            f"<i>Интервал {interval_min} мин · {start_hour:02d}:00 — {end_hour:02d}:00</i>"
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("rule_next:"))
+async def handle_rule_next_month(callback: CallbackQuery, state: FSMContext):
+    """Создаёт расписание по тому же правилу на следующий месяц."""
+    await callback.answer()
+    parts = callback.data.split(":")
+    next_year = int(parts[1])
+    next_month = int(parts[2])
+    wd_mask = int(parts[3])
+    start_hour = int(parts[4])
+    end_hour = int(parts[5])
+    interval_min = int(parts[6])
+
+    weekdays = {i for i in range(7) if wd_mask & (1 << i)}
+    last_day = cal_module.monthrange(next_year, next_month)[1]
+
+    dates = [
+        date(next_year, next_month, d).strftime("%Y-%m-%d")
+        for d in range(1, last_day + 1)
+        if date(next_year, next_month, d).weekday() in weekdays
+    ]
+
+    result = await db.bulk_create_slots(
+        dates,
+        f"{start_hour:02d}:00",
+        f"{end_hour:02d}:00",
+        interval_min,
+    )
+    created = result["created"]
+    skipped = result["skipped"]
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Посмотреть расписание", callback_data="admin:schedule")
+    builder.adjust(1)
+
+    skip_text = f"\nПропущено <b>{skipped}</b> (уже существовали)" if skipped else ""
+    await callback.message.edit_text(
+        text=(
+            f"✅ <b>Расписание на {MONTHS_RU[next_month]} создано!</b>\n\n"
+            f"Создано <b>{created}</b> слотов на <b>{len(dates)}</b> рабочих дней.{skip_text}\n\n"
+            f"<i>Интервал {interval_min} мин · {start_hour:02d}:00 — {end_hour:02d}:00</i>"
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+# ===================================================
+# 11. РЕДАКТОР РАСПИСАНИЯ
+# ===================================================
+
+async def _show_schedule_edit_calendar(message, year: int, month: int, edit: bool = True):
+    """Вспомогательная функция: показывает календарь редактора."""
+    dates_with_slots = await db.get_dates_with_any_slots(year, month)
+    kb = build_admin_calendar(
+        year, month, dates_with_slots,
+        nav_prefix="admin_ed_cal_nav",
+        date_prefix="admin_ed_cal_date",
+    )
+    text = (
+        "✏️ <b>Редактировать расписание</b>\n\n"
+        "Выберите день для редактирования:\n"
+        "<i>📅 — есть слоты</i>"
+    )
+    if edit:
+        await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:schedule_edit")
+async def handle_admin_schedule_edit(callback: CallbackQuery, state: FSMContext):
+    """Точка входа в редактор расписания."""
+    await callback.answer()
+    await state.clear()
+    await state.set_state(AdminScheduleEditStates.waiting_date)
+    year, month = get_current_month_year()
+    await _show_schedule_edit_calendar(callback.message, year, month)
+
+
+@router.callback_query(
+    StateFilter(AdminScheduleEditStates.waiting_date, AdminScheduleEditStates.editing_slots),
+    F.data.startswith("admin_ed_cal_nav:"),
+)
+async def handle_admin_ed_cal_nav(callback: CallbackQuery, state: FSMContext):
+    """Навигация по месяцам в редакторе."""
+    await callback.answer()
+    _, year_str, month_str = callback.data.split(":")
+    await state.set_state(AdminScheduleEditStates.waiting_date)
+    await _show_schedule_edit_calendar(callback.message, int(year_str), int(month_str))
+
+
+@router.callback_query(
+    StateFilter(AdminScheduleEditStates.waiting_date, AdminScheduleEditStates.editing_slots),
+    F.data.startswith("admin_ed_cal_date:"),
+)
+async def handle_admin_ed_cal_date(callback: CallbackQuery, state: FSMContext):
+    """Дата выбрана — показываем тогглы слотов."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+
+    slots = await db.get_all_slots_for_date(date_str)
+    if not slots:
+        await callback.answer("На этот день слотов нет.", show_alert=True)
+        return
+
+    await state.set_state(AdminScheduleEditStates.editing_slots)
+    await state.update_data(edit_date=date_str, removed_ids=[])
+
+    booked_count = sum(1 for s in slots if not s["is_available"])
+    await callback.message.edit_text(
+        text=(
+            f"✏️ <b>Редактирование: {format_date_ru(date_str)}</b>\n\n"
+            f"Слотов: {len(slots)} · Занято: {booked_count}\n\n"
+            "✅ — активен  ❌ — будет удалён  🔒 — занят (нельзя удалить)\n"
+            "<i>Нажмите на слот, чтобы пометить его для удаления</i>"
+        ),
+        reply_markup=get_slot_edit_keyboard(slots, set(), date_str),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminScheduleEditStates.editing_slots, F.data.startswith("edit_slot_toggle:"))
+async def handle_edit_slot_toggle(callback: CallbackQuery, state: FSMContext):
+    """Переключить пометку слота для удаления."""
+    await callback.answer()
+    slot_id = callback.data.split(":", 1)[1]
+    fsm = await state.get_data()
+    removed_ids = set(fsm.get("removed_ids", []))
+    date_str = fsm["edit_date"]
+
+    if slot_id in removed_ids:
+        removed_ids.discard(slot_id)
+    else:
+        removed_ids.add(slot_id)
+    await state.update_data(removed_ids=list(removed_ids))
+
+    slots = await db.get_all_slots_for_date(date_str)
+    await callback.message.edit_reply_markup(
+        reply_markup=get_slot_edit_keyboard(slots, removed_ids, date_str)
+    )
+
+
+@router.callback_query(AdminScheduleEditStates.editing_slots, F.data == "edit_slot_save")
+async def handle_edit_slot_save(callback: CallbackQuery, state: FSMContext):
+    """Применить изменения: удалить помеченные слоты из БД."""
+    await callback.answer()
+    fsm = await state.get_data()
+    removed_ids = set(fsm.get("removed_ids", []))
+    date_str = fsm["edit_date"]
+
+    if not removed_ids:
+        await callback.answer("Нет помеченных слотов для удаления.", show_alert=True)
+        return
+
+    deleted = 0
+    for slot_id in removed_ids:
+        if await db.delete_slot_by_id(slot_id):
+            deleted += 1
+
+    await state.update_data(removed_ids=[])
+    slots = await db.get_all_slots_for_date(date_str)
+
+    if slots:
+        await callback.message.edit_text(
+            text=(
+                f"✅ Удалено слотов: <b>{deleted}</b>\n\n"
+                f"✏️ <b>Редактирование: {format_date_ru(date_str)}</b>\n\n"
+                "✅ — активен  🔒 — занят (нельзя удалить)"
+            ),
+            reply_markup=get_slot_edit_keyboard(slots, set(), date_str),
+            parse_mode="HTML",
+        )
+    else:
+        await state.set_state(AdminScheduleEditStates.waiting_date)
+        year, month = int(date_str[:4]), int(date_str[5:7])
+        await callback.answer(f"День {format_date_ru(date_str)} теперь пуст.", show_alert=True)
+        await _show_schedule_edit_calendar(callback.message, year, month)
+
+
+@router.callback_query(AdminScheduleEditStates.editing_slots, F.data.startswith("edit_day_delete:"))
+async def handle_edit_day_delete_prompt(callback: CallbackQuery):
+    """Запрос подтверждения удаления всего дня."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, удалить весь день", callback_data=f"edit_day_confirm:{date_str}")
+    builder.button(text="← Нет, назад", callback_data=f"admin_ed_cal_date:{date_str}")
+    builder.adjust(1)
+
+    await callback.message.edit_text(
+        text=(
+            f"⚠️ <b>Удалить все слоты за {format_date_ru(date_str)}?</b>\n\n"
+            "Занятые бронированиями слоты не будут удалены.\n"
+            "Это действие нельзя отменить."
+        ),
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("edit_day_confirm:"))
+async def handle_edit_day_confirm(callback: CallbackQuery, state: FSMContext):
+    """Выполняет удаление всех свободных слотов дня."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+    deleted = await db.delete_slots_for_date(date_str)
+
+    year, month = int(date_str[:4]), int(date_str[5:7])
+    await state.set_state(AdminScheduleEditStates.waiting_date)
+    await callback.answer(
+        f"Удалено {deleted} слотов за {format_date_ru(date_str)}.",
+        show_alert=True,
+    )
+    await _show_schedule_edit_calendar(callback.message, year, month)
+
+
+@router.callback_query(AdminScheduleEditStates.editing_slots, F.data == "edit_slot_ignore")
+async def handle_edit_slot_ignore(callback: CallbackQuery):
+    """Заглушка для нажатия на занятый слот."""
+    await callback.answer("Этот слот занят бронированием и не может быть удалён.")

@@ -5,7 +5,7 @@
 from supabase import create_client, Client
 from bot.config import settings
 from typing import Optional, List, Dict
-from datetime import date
+from datetime import date, datetime, timedelta
 import logging
 
 logger = logging.getLogger(__name__)
@@ -320,6 +320,110 @@ async def get_all_slots_for_date(slot_date: str) -> List[Dict]:
     except Exception as e:
         logger.error(f"Ошибка получения всех слотов для {slot_date}: {e}")
         return []
+
+
+async def bulk_create_slots(
+    dates: List[str],
+    start_time: str,
+    end_time: str,
+    interval_min: int,
+) -> Dict:
+    """
+    Массово создаёт слоты для списка дат с заданным интервалом.
+
+    Args:
+        dates: Список дат ["YYYY-MM-DD", ...]
+        start_time: Начало "HH:MM"
+        end_time: Конец "HH:MM" (не включается)
+        interval_min: Шаг в минутах (15, 30, 60)
+
+    Returns:
+        {"created": N, "skipped": N}
+    """
+    start_dt = datetime.strptime(start_time, "%H:%M")
+    end_dt = datetime.strptime(end_time, "%H:%M")
+    delta = timedelta(minutes=interval_min)
+
+    # Собираем все слоты для генерации
+    slots_to_create = []
+    current = start_dt
+    while current < end_dt:
+        time_str = current.strftime("%H:%M:%S")
+        for date_str in dates:
+            slots_to_create.append({
+                "slot_date": date_str,
+                "slot_time": time_str,
+                "is_available": True,
+            })
+        current += delta
+
+    if not slots_to_create:
+        return {"created": 0, "skipped": 0}
+
+    # Получаем уже существующие слоты одним запросом
+    existing = set()
+    try:
+        response = (
+            supabase.table("time_slots")
+            .select("slot_date,slot_time")
+            .in_("slot_date", dates)
+            .execute()
+        )
+        for row in (response.data or []):
+            existing.add((row["slot_date"], row["slot_time"]))
+    except Exception as e:
+        logger.error(f"Ошибка проверки существующих слотов: {e}")
+
+    new_slots = [
+        s for s in slots_to_create
+        if (s["slot_date"], s["slot_time"]) not in existing
+    ]
+    skipped = len(slots_to_create) - len(new_slots)
+    created = 0
+
+    # Вставляем новые слоты батчами по 100
+    if new_slots:
+        try:
+            batch_size = 100
+            for i in range(0, len(new_slots), batch_size):
+                supabase.table("time_slots").insert(new_slots[i:i + batch_size]).execute()
+            created = len(new_slots)
+        except Exception as e:
+            logger.error(f"Ошибка bulk insert слотов: {e}")
+
+    return {"created": created, "skipped": skipped}
+
+
+async def delete_slots_for_date(date_str: str) -> int:
+    """
+    Удаляет все СВОБОДНЫЕ слоты за дату.
+    Занятые (is_available=False) слоты не трогает.
+
+    Returns:
+        Количество удалённых слотов
+    """
+    try:
+        response = (
+            supabase.table("time_slots")
+            .delete()
+            .eq("slot_date", date_str)
+            .eq("is_available", True)
+            .execute()
+        )
+        return len(response.data or [])
+    except Exception as e:
+        logger.error(f"Ошибка удаления слотов за {date_str}: {e}")
+        return 0
+
+
+async def delete_slot_by_id(slot_id: str) -> bool:
+    """Удаляет конкретный свободный слот по ID."""
+    try:
+        supabase.table("time_slots").delete().eq("id", slot_id).eq("is_available", True).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка удаления слота {slot_id}: {e}")
+        return False
 
 
 # ===================================================

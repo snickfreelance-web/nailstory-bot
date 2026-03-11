@@ -587,7 +587,9 @@ def get_admin_schedule_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
     builder.button(text="➕ Добавить рабочий день", callback_data="admin_sched:add_day")
-    builder.button(text="📅 Просмотр дня", callback_data="admin_sched:view_day")
+    builder.button(text="📅 Создать расписание на месяц", callback_data="admin:schedule_rule")
+    builder.button(text="✏️ Редактировать расписание", callback_data="admin:schedule_edit")
+    builder.button(text="📋 Просмотр дня", callback_data="admin_sched:view_day")
     builder.button(text="◀ Главное меню", callback_data="admin:main")
 
     builder.adjust(1)
@@ -719,4 +721,84 @@ def get_delete_confirm_keyboard(booking_id: str) -> InlineKeyboardMarkup:
     )
 
     builder.adjust(1)
+    return builder.as_markup()
+
+
+# ===================================================
+# КЛАВИАТУРЫ ГЕНЕРАТОРА И РЕДАКТОРА РАСПИСАНИЯ
+# ===================================================
+
+WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def get_weekday_keyboard(selected: set) -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора дней недели (мультивыбор).
+    ✅ — выбран, ⬜ — не выбран.
+    """
+    builder = InlineKeyboardBuilder()
+    for i, name in enumerate(WEEKDAYS_RU):
+        mark = "✅" if i in selected else "⬜"
+        builder.button(text=f"{mark} {name}", callback_data=f"rule_wd:{i}")
+    builder.adjust(4, 3)
+    builder.row(
+        InlineKeyboardButton(text="✅ Готово →", callback_data="rule_wd_done"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="admin:schedule"),
+    )
+    return builder.as_markup()
+
+
+def get_hour_keyboard(
+    hours: list,
+    cb_prefix: str,
+    cancel_cb: str = "admin:schedule",
+) -> InlineKeyboardMarkup:
+    """
+    Универсальная клавиатура выбора часа.
+
+    Args:
+        hours: Список доступных часов [8, 9, 10, ...]
+        cb_prefix: Префикс callback_data (rule_start / rule_end)
+        cancel_cb: callback_data для кнопки «← Назад»
+    """
+    builder = InlineKeyboardBuilder()
+    for h in hours:
+        builder.button(text=f"{h:02d}:00", callback_data=f"{cb_prefix}:{h}")
+    builder.adjust(4)
+    builder.row(InlineKeyboardButton(text="← Назад", callback_data=cancel_cb))
+    return builder.as_markup()
+
+
+def get_slot_edit_keyboard(
+    slots: list,
+    removed_ids: set,
+    date_str: str,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура редактирования слотов дня.
+    ✅ — слот активен, ❌ — помечен для удаления, 🔒 — занят бронированием.
+    """
+    builder = InlineKeyboardBuilder()
+    for slot in slots:
+        slot_id = slot["id"]
+        time_str = slot["slot_time"][:5]
+        is_booked = not slot["is_available"]
+        if is_booked:
+            builder.button(text=f"🔒 {time_str}", callback_data="edit_slot_ignore")
+        elif slot_id in removed_ids:
+            builder.button(text=f"❌ {time_str}", callback_data=f"edit_slot_toggle:{slot_id}")
+        else:
+            builder.button(text=f"✅ {time_str}", callback_data=f"edit_slot_toggle:{slot_id}")
+    builder.adjust(4)
+    builder.row(InlineKeyboardButton(
+        text="💾 Сохранить изменения", callback_data="edit_slot_save"
+    ))
+    builder.row(
+        InlineKeyboardButton(
+            text="🗑 Удалить весь день", callback_data=f"edit_day_delete:{date_str}"
+        ),
+        InlineKeyboardButton(
+            text="← Другой день", callback_data="admin:schedule_edit"
+        ),
+    )
     return builder.as_markup()
