@@ -486,6 +486,29 @@ async def get_bookings_count(status_filter: Optional[str] = None) -> int:
         return 0
 
 
+async def get_dates_with_available_slots(year: int, month: int) -> List[str]:
+    """Возвращает даты в месяце, на которые есть хотя бы один свободный слот."""
+    try:
+        start_date = f"{year:04d}-{month:02d}-01"
+        end_date = f"{year:04d}-{month + 1:02d}-01" if month < 12 else f"{year + 1:04d}-01-01"
+
+        response = (
+            supabase.table("time_slots")
+            .select("slot_date")
+            .eq("is_available", True)
+            .gte("slot_date", start_date)
+            .lt("slot_date", end_date)
+            .execute()
+        )
+        if not response.data:
+            return []
+        dates = list(set(row["slot_date"] for row in response.data))
+        return sorted(dates)
+    except Exception as e:
+        logger.error(f"Ошибка получения дат со свободными слотами: {e}")
+        return []
+
+
 async def get_dates_with_bookings(year: int, month: int) -> List[str]:
     """Возвращает список дат в формате YYYY-MM-DD, на которые есть хотя бы одно бронирование."""
     try:
