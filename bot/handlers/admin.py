@@ -39,7 +39,7 @@ from bot.utils.validators import (
     is_valid_phone,
     normalize_phone,
 )
-from bot.utils.calendar import build_time_slots_keyboard
+from bot.utils.calendar import build_time_slots_keyboard, build_admin_calendar, get_current_month_year
 from bot import database as db
 
 logger = logging.getLogger(__name__)
@@ -1231,16 +1231,12 @@ async def handle_admin_sched_add_day(callback: CallbackQuery, state: FSMContext)
     await state.set_state(AdminSlotStates.waiting_date)
     await state.update_data(filter_context="schedule")
 
-    builder = InlineKeyboardBuilder()
-    builder.button(text="❌ Отмена", callback_data="admin:schedule")
+    year, month = get_current_month_year()
+    dates_with_slots = await db.get_dates_with_any_slots(year, month)
 
     await callback.message.edit_text(
-        text=(
-            "📅 <b>Добавить рабочий день</b>\n\n"
-            "Введите дату нового рабочего дня:\n"
-            "<i>Формат: ДД.ММ.ГГГГ (например, 25.03.2024)</i>"
-        ),
-        reply_markup=builder.as_markup(),
+        text="📅 <b>Добавить рабочий день</b>\n\nВыберите дату:\n📅 — уже есть слоты",
+        reply_markup=build_admin_calendar(year, month, dates_with_slots),
         parse_mode="HTML",
     )
 
@@ -1313,11 +1309,47 @@ async def handle_admin_sched_date(message: Message, state: FSMContext):
     )
 
 
-# Catch-хендлер для нетекстовых сообщений на шаге даты
+# Catch-хендлер для нетекстовых сообщений на шаге даты (контексты bookings/view_slots)
 @router.message(AdminSlotStates.waiting_date)
 async def handle_admin_sched_date_invalid(message: Message):
     await message.answer(
         "❌ Введите дату текстом в формате <code>ДД.ММ.ГГГГ</code>",
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminSlotStates.waiting_date, F.data.startswith("admin_cal_nav:"))
+async def handle_admin_cal_nav(callback: CallbackQuery, state: FSMContext):
+    """Навигация по месяцам в админском календаре."""
+    await callback.answer()
+    _, year_str, month_str = callback.data.split(":")
+    year, month = int(year_str), int(month_str)
+
+    dates_with_slots = await db.get_dates_with_any_slots(year, month)
+
+    await callback.message.edit_text(
+        text="📅 <b>Добавить рабочий день</b>\n\nВыберите дату:\n📅 — уже есть слоты",
+        reply_markup=build_admin_calendar(year, month, dates_with_slots),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AdminSlotStates.waiting_date, F.data.startswith("admin_cal_date:"))
+async def handle_admin_cal_date(callback: CallbackQuery, state: FSMContext):
+    """Выбор даты в админском календаре — переход к выбору временных слотов."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]  # "YYYY-MM-DD"
+
+    await state.update_data(sched_date=date_str)
+    await state.set_state(AdminSlotStates.waiting_time)
+
+    await callback.message.edit_text(
+        text=(
+            f"📅 Дата: <b>{format_date_ru(date_str)}</b>\n\n"
+            "🕐 Нажмите на время чтобы добавить рабочий слот.\n"
+            "Нажмите <b>✅ Готово</b> когда добавите все нужные слоты."
+        ),
+        reply_markup=get_admin_time_slots_keyboard(),
         parse_mode="HTML",
     )
 
