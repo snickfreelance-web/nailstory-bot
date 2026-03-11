@@ -260,6 +260,65 @@ def build_admin_calendar(
     return builder.as_markup()
 
 
+def build_admin_bookings_calendar(
+    year: int,
+    month: int,
+    dates_with_bookings: List[str],
+) -> InlineKeyboardMarkup:
+    """
+    Строит инлайн-клавиатуру выбора даты для просмотра бронирований.
+
+    Отличия от build_admin_calendar():
+    - Кнопка ◀ доступна всегда (admin может листать прошлые месяцы)
+    - Дни с бронированиями помечаются 📅 и кликабельны
+    - Дни без бронирований — нажать нельзя
+    - Навигация: admin_bk_cal_nav:YYYY:M
+    - Выбор даты: admin_bk_cal_date:YYYY-MM-DD
+
+    Args:
+        year: Год для отображения
+        month: Месяц 1-12
+        dates_with_bookings: Даты, на которые есть хотя бы одно бронирование
+
+    Returns:
+        InlineKeyboardMarkup — готовая клавиатура
+    """
+    builder = InlineKeyboardBuilder()
+
+    prev_month = month - 1 if month > 1 else 12
+    prev_year = year if month > 1 else year - 1
+    next_month = month + 1 if month < 12 else 1
+    next_year = year if month < 12 else year + 1
+
+    # Кнопка ◀ всегда доступна — admin смотрит и прошлые месяцы
+    builder.button(text="◀", callback_data=f"admin_bk_cal_nav:{prev_year}:{prev_month}")
+    builder.button(text=f"{MONTHS_RU[month]} {year}", callback_data="cal_ignore")
+    builder.button(text="▶", callback_data=f"admin_bk_cal_nav:{next_year}:{next_month}")
+    builder.adjust(3)
+
+    # Заголовки дней недели
+    for day_name in WEEKDAYS:
+        builder.button(text=day_name, callback_data="cal_ignore")
+
+    # Числа месяца
+    month_calendar = calendar.monthcalendar(year, month)
+    for week in month_calendar:
+        for day_num in week:
+            if day_num == 0:
+                builder.button(text=" ", callback_data="cal_ignore")
+            else:
+                day_str = f"{year:04d}-{month:02d}-{day_num:02d}"
+                if day_str in dates_with_bookings:
+                    builder.button(text=f"📅{day_num}", callback_data=f"admin_bk_cal_date:{day_str}")
+                else:
+                    builder.button(text=str(day_num), callback_data="cal_ignore")
+
+    row_widths = [3, 7] + [7] * len(month_calendar)
+    builder.adjust(*row_widths)
+
+    return builder.as_markup()
+
+
 def get_current_month_year():
     """
     Возвращает текущий год и месяц.

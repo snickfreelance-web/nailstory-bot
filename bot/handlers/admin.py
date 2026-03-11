@@ -39,7 +39,7 @@ from bot.utils.validators import (
     is_valid_phone,
     normalize_phone,
 )
-from bot.utils.calendar import build_time_slots_keyboard, build_admin_calendar, get_current_month_year
+from bot.utils.calendar import build_time_slots_keyboard, build_admin_calendar, build_admin_bookings_calendar, get_current_month_year
 from bot import database as db
 
 logger = logging.getLogger(__name__)
@@ -806,12 +806,128 @@ async def handle_admin_bookings(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
 
+    year, month = get_current_month_year()
+    dates_with_bookings = await db.get_dates_with_bookings(year, month)
+
     await callback.message.edit_text(
         text=(
             "📋 <b>Бронирования</b>\n\n"
-            "Выберите фильтр для отображения записей:"
+            "Выберите дату — увидите все записи на этот день.\n"
+            "<i>📅 — на дату есть записи</i>"
         ),
-        reply_markup=get_admin_bookings_filter_keyboard(),
+        reply_markup=build_admin_bookings_calendar(year, month, dates_with_bookings),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("admin_bk_cal_nav:"))
+async def handle_admin_bk_cal_nav(callback: CallbackQuery):
+    await callback.answer()
+
+    _, year_str, month_str = callback.data.split(":")
+    year, month = int(year_str), int(month_str)
+
+    dates_with_bookings = await db.get_dates_with_bookings(year, month)
+
+    await callback.message.edit_text(
+        text=(
+            "📋 <b>Бронирования</b>\n\n"
+            "Выберите дату — увидите все записи на этот день.\n"
+            "<i>📅 — на дату есть записи</i>"
+        ),
+        reply_markup=build_admin_bookings_calendar(year, month, dates_with_bookings),
+        parse_mode="HTML",
+    )
+
+
+async def _show_bookings_for_date(message, date_str: str, edit: bool = False):
+    """Показывает список бронирований на конкретную дату."""
+    bookings = await db.get_all_bookings(date_filter=date_str)
+
+    year = int(date_str[:4])
+    month = int(date_str[5:7])
+    back_cb = f"admin_bk_pick_date:{year}:{month}"
+
+    builder = InlineKeyboardBuilder()
+
+    if not bookings:
+        builder.button(text="← Выбрать другую дату", callback_data=back_cb)
+        text = (
+            f"📋 <b>{format_date_ru(date_str)}</b>\n\n"
+            "Записей на этот день нет."
+        )
+    else:
+        status_icons = {"pending": "⏳", "confirmed": "✅", "cancelled": "❌"}
+        for booking in bookings:
+            time_str = format_time_ru(booking["booking_time"])
+            icon = status_icons.get(booking["status"], "?")
+            builder.button(
+                text=f"{icon} {booking['full_name']} · {time_str}",
+                callback_data=f"admin_bk_date_view:{booking['id']}"
+            )
+        builder.button(text="← Выбрать другую дату", callback_data=back_cb)
+        builder.adjust(1)
+        text = (
+            f"📋 <b>{format_date_ru(date_str)}</b> — {len(bookings)} зап."
+        )
+
+    if edit:
+        await message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("admin_bk_cal_date:"))
+async def handle_admin_bk_cal_date(callback: CallbackQuery):
+    await callback.answer()
+
+    date_str = callback.data.split(":", 1)[1]
+    await _show_bookings_for_date(callback.message, date_str, edit=True)
+
+
+@router.callback_query(F.data.startswith("admin_bk_pick_date:"))
+async def handle_admin_bk_pick_date(callback: CallbackQuery):
+    """Возврат к календарю бронирований на конкретный месяц."""
+    await callback.answer()
+
+    _, year_str, month_str = callback.data.split(":")
+    year, month = int(year_str), int(month_str)
+
+    dates_with_bookings = await db.get_dates_with_bookings(year, month)
+
+    await callback.message.edit_text(
+        text=(
+            "📋 <b>Бронирования</b>\n\n"
+            "Выберите дату — увидите все записи на этот день.\n"
+            "<i>📅 — на дату есть записи</i>"
+        ),
+        reply_markup=build_admin_bookings_calendar(year, month, dates_with_bookings),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("admin_bk_date_view:"))
+async def handle_admin_bk_date_view(callback: CallbackQuery):
+    """Открывает карточку бронирования с кнопкой возврата к списку за дату."""
+    await callback.answer()
+
+    # Формат: "admin_bk_date_view:{booking_uuid}" — дату берём из бронирования
+    booking_id = callback.data.split(":", 1)[1]
+
+    booking = await db.get_booking_by_id(booking_id)
+    if not booking:
+        await callback.answer("Бронирование не найдено", show_alert=True)
+        return
+
+    date_str = booking["booking_date"]  # YYYY-MM-DD из объекта бронирования
+
+    await callback.message.edit_text(
+        text=await _render_booking_detail(booking),
+        reply_markup=get_admin_booking_actions_keyboard(
+            booking_id,
+            booking["status"],
+            back_cb=f"admin_bk_cal_date:{date_str}",
+        ),
         parse_mode="HTML",
     )
 
@@ -821,23 +937,6 @@ async def handle_admin_bookings_filter(callback: CallbackQuery, state: FSMContex
     await callback.answer()
 
     filter_type = callback.data.split(":", 1)[1]
-
-    if filter_type == "date":
-        await state.set_state(AdminSlotStates.waiting_date)
-        await state.update_data(filter_context="bookings")
-
-        builder = InlineKeyboardBuilder()
-        builder.button(text="❌ Отмена", callback_data="admin:bookings")
-
-        await callback.message.edit_text(
-            text=(
-                "📅 Введите дату для просмотра бронирований:\n\n"
-                "<i>Формат: ДД.ММ.ГГГГ (например, 15.03.2024)</i>"
-            ),
-            reply_markup=builder.as_markup(),
-            parse_mode="HTML",
-        )
-        return
 
     status = None if filter_type == "all" else filter_type
     await _show_bookings_page(callback.message, page=0, filter_type=filter_type, status=status, edit=True)
@@ -953,7 +1052,10 @@ async def handle_admin_booking_view(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text(
         text=await _render_booking_detail(booking),
-        reply_markup=get_admin_booking_actions_keyboard(booking_id, booking["status"]),
+        reply_markup=get_admin_booking_actions_keyboard(
+            booking_id, booking["status"],
+            back_cb=f"admin_bk_cal_date:{booking['booking_date']}",
+        ),
         parse_mode="HTML",
     )
 
@@ -971,7 +1073,10 @@ async def handle_admin_booking_confirm(callback: CallbackQuery):
         if booking:
             await callback.message.edit_text(
                 text=await _render_booking_detail(booking),
-                reply_markup=get_admin_booking_actions_keyboard(booking_id, booking["status"]),
+                reply_markup=get_admin_booking_actions_keyboard(
+                    booking_id, booking["status"],
+                    back_cb=f"admin_bk_cal_date:{booking['booking_date']}",
+                ),
                 parse_mode="HTML",
             )
     else:
@@ -998,7 +1103,10 @@ async def handle_admin_booking_cancel(callback: CallbackQuery):
         if booking:
             await callback.message.edit_text(
                 text=await _render_booking_detail(booking),
-                reply_markup=get_admin_booking_actions_keyboard(booking_id, booking["status"]),
+                reply_markup=get_admin_booking_actions_keyboard(
+                    booking_id, booking["status"],
+                    back_cb=f"admin_bk_cal_date:{booking['booking_date']}",
+                ),
                 parse_mode="HTML",
             )
     else:
@@ -1031,7 +1139,10 @@ async def handle_admin_booking_restore(callback: CallbackQuery):
         if booking:
             await callback.message.edit_text(
                 text=await _render_booking_detail(booking),
-                reply_markup=get_admin_booking_actions_keyboard(booking_id, booking["status"]),
+                reply_markup=get_admin_booking_actions_keyboard(
+                    booking_id, booking["status"],
+                    back_cb=f"admin_bk_cal_date:{booking['booking_date']}",
+                ),
                 parse_mode="HTML",
             )
 

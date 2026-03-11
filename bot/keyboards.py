@@ -469,7 +469,8 @@ def get_admin_bookings_filter_keyboard() -> InlineKeyboardMarkup:
 def get_admin_booking_actions_keyboard(
     booking_id: str,
     current_status: str,
-    page: int = 0
+    page: int = 0,
+    back_cb: str = None,
 ) -> InlineKeyboardMarkup:
     """
     Клавиатура действий с конкретным бронированием.
@@ -477,7 +478,10 @@ def get_admin_booking_actions_keyboard(
     Args:
         booking_id: UUID бронирования
         current_status: Текущий статус для показа доступных действий
-        page: Текущая страница списка (для возврата назад)
+        page: Текущая страница списка (для возврата назад, если back_cb не задан)
+        back_cb: Переопределяет callback кнопки «Назад».
+                 Например, "admin_bk_cal_date:2024-03-15" для возврата
+                 к списку бронирований за конкретный день.
 
     Returns:
         Клавиатура с действиями
@@ -516,10 +520,10 @@ def get_admin_booking_actions_keyboard(
         callback_data=f"admin_bk_delete:{booking_id}"
     )
 
-    # Кнопка возврата к списку с сохранением страницы пагинации
+    # Кнопка возврата: либо к списку по дате, либо к пагинированному списку
     builder.button(
-        text="◀ К списку",
-        callback_data=f"admin_bk_list:{page}"
+        text="◀ Назад",
+        callback_data=back_cb if back_cb else f"admin_bk_list:{page}"
     )
 
     builder.adjust(1)

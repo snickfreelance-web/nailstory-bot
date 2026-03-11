@@ -486,6 +486,31 @@ async def get_bookings_count(status_filter: Optional[str] = None) -> int:
         return 0
 
 
+async def get_dates_with_bookings(year: int, month: int) -> List[str]:
+    """Возвращает список дат в формате YYYY-MM-DD, на которые есть хотя бы одно бронирование."""
+    try:
+        start_date = f"{year:04d}-{month:02d}-01"
+        if month == 12:
+            end_date = f"{year + 1:04d}-01-01"
+        else:
+            end_date = f"{year:04d}-{month + 1:02d}-01"
+
+        response = (
+            supabase.table("bookings")
+            .select("booking_date")
+            .gte("booking_date", start_date)
+            .lt("booking_date", end_date)
+            .execute()
+        )
+        if not response.data:
+            return []
+        dates = list(set(row["booking_date"] for row in response.data))
+        return sorted(dates)
+    except Exception as e:
+        logger.error(f"Ошибка получения дат с бронированиями: {e}")
+        return []
+
+
 async def get_upcoming_bookings_for_date(target_date: str) -> List[Dict]:
     try:
         response = (
