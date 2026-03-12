@@ -3478,26 +3478,12 @@ async def handle_default_interval(callback: CallbackQuery, state: FSMContext):
 
     # Пробуем сохранить — если таблица не создана, покажем ошибку
     saved = await db.save_default_schedule(weekdays_mask, start_hour, end_hour, interval_min)
-    if not saved:
+    if saved is not True:
         back_builder = InlineKeyboardBuilder()
         back_builder.button(text="◀ Назад", callback_data="admin:default_schedule")
+        error_detail = f"\n\n<code>{saved}</code>" if isinstance(saved, str) else ""
         await callback.message.edit_text(
-            text=(
-                "❌ <b>Ошибка сохранения</b>\n\n"
-                "Убедитесь, что таблицы созданы в Supabase. "
-                "SQL для создания таблиц:\n\n"
-                "<code>create table default_schedule (\n"
-                "  id integer primary key default 1,\n"
-                "  weekdays_mask integer not null,\n"
-                "  start_hour integer not null,\n"
-                "  end_hour integer not null,\n"
-                "  interval_min integer not null,\n"
-                "  updated_at timestamptz default now()\n"
-                ");\n\n"
-                "create table custom_days (\n"
-                "  date date primary key\n"
-                ");</code>"
-            ),
+            text=f"❌ <b>Ошибка сохранения</b>{error_detail}",
             reply_markup=back_builder.as_markup(),
             parse_mode="HTML",
         )

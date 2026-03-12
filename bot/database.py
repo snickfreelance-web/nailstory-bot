@@ -975,7 +975,7 @@ async def save_default_schedule(
         return True
     except Exception as e:
         logger.error(f"Ошибка сохранения стандартного расписания: {e}")
-        return False
+        return str(e)  # возвращаем текст ошибки для отображения
 
 
 async def delete_default_schedule() -> bool:
