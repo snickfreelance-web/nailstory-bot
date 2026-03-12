@@ -1133,56 +1133,63 @@ async def get_day_schedule_info(date_str: str) -> Optional[Dict]:
 async def reset_default_schedule_slots() -> Dict:
     """
     При задании/смене стандартного расписания:
-    1. Удаляет ВСЕ свободные слоты для дней, НЕ входящих в новый шаблон
-       (включая кастомные — задать стандарт = закрыть эти дни)
-    2. Снимает кастомный флаг с удалённых дат
-    3. Добавляет недостающие слоты для рабочих дней (пропускает существующие)
+    1. Удаляет ВСЕ некастомные (не day-level) свободные слоты в будущем
+       — это очищает и старый стандарт, и месячные прогоны
+    2. Сохраняет кастомные (отредактированные на уровне дня) слоты
+    3. Добавляет новые слоты по текущему правилу на 24 мес вперёд
     Вызывается ПОСЛЕ save_default_schedule().
     """
-    rule = await get_default_schedule()
-    if not rule:
-        return {"error": "no_rule"}
-
     today = date.today()
-    months_ahead = 24
-    end_date = date(
-        today.year + (today.month + months_ahead - 1) // 12,
-        (today.month + months_ahead - 1) % 12 + 1,
-        1,
-    )
+    custom = await get_custom_days()  # только day-level overrides
 
-    # Удаляем свободные слоты для дней, НЕ входящих в шаблон по дням недели
     try:
         response = (
             supabase.table("time_slots")
             .select("id,slot_date")
             .eq("is_available", True)
             .gte("slot_date", today.isoformat())
-            .lt("slot_date", end_date.isoformat())
             .execute()
         )
-        ids_to_delete = []
-        dates_to_uncustom = set()
-        for row in (response.data or []):
-            d = date.fromisoformat(row["slot_date"])
-            weekday_bit = 1 << d.weekday()
-            if not (rule["weekdays_mask"] & weekday_bit):
-                ids_to_delete.append(row["id"])
-                dates_to_uncustom.add(row["slot_date"])
-
+        ids_to_delete = [
+            row["id"] for row in (response.data or [])
+            if row["slot_date"] not in custom
+        ]
         if ids_to_delete:
             batch_size = 100
             for i in range(0, len(ids_to_delete), batch_size):
                 supabase.table("time_slots").delete().in_(
                     "id", ids_to_delete[i:i + batch_size]
                 ).execute()
-
-        # Снимаем кастомный флаг с удалённых нерабочих дат
-        for d_str in dates_to_uncustom:
-            await remove_custom_day(d_str)
-
     except Exception as e:
-        logger.error(f"Ошибка удаления нерабочих слотов при смене стандарта: {e}")
+        logger.error(f"Ошибка очистки слотов при смене стандарта: {e}")
 
-    # Добавляем слоты для рабочих дней (пропускает уже существующие)
     return await apply_default_schedule_for_months(24)
+
+
+# ===================================================
+# НАСТРОЙКИ БОТА (bot_settings)
+# ===================================================
+
+async def get_setting(key: str) -> Optional[str]:
+    """Возвращает значение настройки по ключу или None."""
+    try:
+        response = (
+            supabase.table("bot_settings")
+            .select("value")
+            .eq("key", key)
+            .execute()
+        )
+        return response.data[0]["value"] if response.data else None
+    except Exception as e:
+        logger.error(f"Ошибка чтения настройки {key}: {e}")
+        return None
+
+
+async def set_setting(key: str, value: str) -> bool:
+    """Сохраняет (upsert) значение настройки."""
+    try:
+        supabase.table("bot_settings").upsert({"key": key, "value": value}).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения настройки {key}: {e}")
+        return False

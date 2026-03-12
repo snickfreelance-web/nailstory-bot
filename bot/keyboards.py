@@ -574,18 +574,27 @@ def get_admin_pagination_keyboard(
     return builder.as_markup()
 
 
+def get_schedule_mode_choice_keyboard() -> InlineKeyboardMarkup:
+    """Первичный выбор режима расписания."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Стандартное — задаётся один раз", callback_data="sched_mode:standard")
+    builder.button(text="🗓 По месяцам — вручную каждый месяц", callback_data="sched_mode:monthly")
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def get_admin_schedule_keyboard() -> InlineKeyboardMarkup:
     """
     Меню управления расписанием (временными слотами).
     Кнопки отображаются ПОД календарём текущего месяца.
+    Используется только в старом флоу — заменяется режимными клавиатурами.
     """
     builder = InlineKeyboardBuilder()
-
     builder.button(text="⚙️ Стандартное расписание", callback_data="admin:default_schedule")
     builder.button(text="📅 Создать расписание на месяц", callback_data="admin:schedule_rule")
     builder.button(text="✏️ Редактировать расписание", callback_data="admin:schedule_edit")
     builder.button(text="◀ Главное меню", callback_data="admin:main")
-
     builder.adjust(1)
     return builder.as_markup()
 
