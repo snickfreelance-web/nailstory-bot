@@ -1428,6 +1428,8 @@ async def _show_schedule_view_calendar(
 
     kb.inline_keyboard.extend([
         [InlineKeyboardButton(text="🔄 Сменить режим", callback_data="sched_mode:change")],
+        # TODO: убрать кнопку после завершения тестирования
+        [InlineKeyboardButton(text="🗑 [ТЕСТ] Удалить всё расписание", callback_data="sched_test_clear")],
         [InlineKeyboardButton(text="◀ Главное меню", callback_data="admin:main")],
     ])
 
@@ -1589,8 +1591,7 @@ async def _show_hour_grid(message, date_str: str, state: FSMContext, is_new_day:
             f"📅 <b>{format_date_ru(date_str)}</b> — {action}\n\n"
             f"{range_hint}"
             "Первый ✅ = открытие · Последний ✅ = закрытие\n"
-            "<i>Слоты создаются между открытием и закрытием.</i>\n\n"
-            "Интервал — время между записями:"
+            "<i>Слоты создаются между открытием и закрытием.</i>"
         ),
         reply_markup=get_hour_grid_keyboard(date_str, active_hours, interval_min, is_new_day),
         parse_mode="HTML",
@@ -3948,6 +3949,60 @@ async def handle_default_sched_delete(callback: CallbackQuery, state: FSMContext
     builder.button(text="◀ К расписанию", callback_data="admin:schedule")
     await callback.message.edit_text(
         text="🗑 Стандартное расписание удалено.\nСлоты создаются вручную.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+
+
+# ===================================================
+# ВСПОМОГАТЕЛЬНЫЕ ОБРАБОТЧИКИ
+# ===================================================
+
+@router.callback_query(F.data == "noop")
+async def handle_noop(callback: CallbackQuery):
+    """Заглушка для неактивных кнопок-разделителей."""
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sched_test_clear")
+async def handle_sched_test_clear(callback: CallbackQuery, state: FSMContext):
+    """[ТЕСТ] Удаляет всё расписание: слоты, default_schedule, custom_days, schedule_mode."""
+    await callback.answer()
+    await state.clear()
+
+    # 1. Удалить все слоты (все, включая забронированные — для теста)
+    try:
+        db.supabase.table("time_slots").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+    except Exception as e:
+        logger.error(f"[ТЕСТ] Ошибка удаления слотов: {e}")
+
+    # 2. Удалить стандартное расписание
+    await db.delete_default_schedule()
+
+    # 3. Удалить все custom_days
+    try:
+        db.supabase.table("custom_days").delete().neq("date", "0000-00-00").execute()
+    except Exception as e:
+        logger.error(f"[ТЕСТ] Ошибка удаления custom_days: {e}")
+
+    # 4. Сбросить schedule_mode
+    try:
+        db.supabase.table("bot_settings").delete().eq("key", "schedule_mode").execute()
+    except Exception as e:
+        logger.error(f"[ТЕСТ] Ошибка сброса schedule_mode: {e}")
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="◀ К расписанию", callback_data="admin:schedule")
+    await callback.message.edit_text(
+        text=(
+            "🗑 <b>[ТЕСТ] Расписание полностью очищено</b>\n\n"
+            "Удалено:\n"
+            "• Все слоты\n"
+            "• Стандартное расписание\n"
+            "• Все custom_days\n"
+            "• Настройка schedule_mode\n\n"
+            "Можно начать тест с чистого листа."
+        ),
         reply_markup=builder.as_markup(),
         parse_mode="HTML",
     )
