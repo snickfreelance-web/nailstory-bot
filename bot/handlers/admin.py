@@ -1574,19 +1574,23 @@ async def _show_hour_grid(message, date_str: str, state: FSMContext, is_new_day:
     fsm = await state.get_data()
     active_hours = set(fsm.get("hgrid_active", []))
     interval_min = fsm.get("hgrid_interval", 60)
-    info = await db.get_day_schedule_info(date_str)
 
-    if info:
-        time_hint = f"🕐 {info['start']} – {info['end_exclusive']} · {info['interval_min']} мин\n"
+    # Показываем режим работы на основе текущего выбора в сетке
+    if active_hours:
+        min_h = min(active_hours)
+        max_h = max(active_hours)
+        range_hint = f"🕐 Режим работы: <b>{min_h:02d}:00 – {max_h:02d}:00</b>\n"
     else:
-        time_hint = ""
+        range_hint = ""
 
     action = "новый день" if is_new_day else "редактирование"
     await message.edit_text(
         text=(
             f"📅 <b>{format_date_ru(date_str)}</b> — {action}\n\n"
-            f"{time_hint}"
-            "Выберите рабочие часы (✅ — включён, ⬜ — выключен):"
+            f"{range_hint}"
+            "Первый ✅ = открытие · Последний ✅ = закрытие\n"
+            "<i>Слоты создаются между открытием и закрытием.</i>\n\n"
+            "Интервал — время между записями:"
         ),
         reply_markup=get_hour_grid_keyboard(date_str, active_hours, interval_min, is_new_day),
         parse_mode="HTML",
@@ -1599,16 +1603,24 @@ async def handle_admin_sched_edit_day(callback: CallbackQuery, state: FSMContext
     await callback.answer()
     date_str = callback.data.split(":", 1)[1]
 
-    active_hours = await db.get_active_hours_for_date(date_str)
+    slot_hours = await db.get_active_hours_for_date(date_str)
     info = await db.get_day_schedule_info(date_str)
     interval_min = info["interval_min"] if info else 60
+
+    # Добавляем час закрытия в отображение (end_exclusive):
+    # пользователь видит 9-21 (а не 9-20) — последний ✅ = время закрытия
+    display_hours = set(slot_hours)
+    if info and info["end_exclusive"] != "24:00":
+        closing_h = int(info["end_exclusive"][:2])
+        display_hours.add(closing_h)
+    # Если end_exclusive == "24:00" — последний слот в 23:xx, в сетке 0-23 нет ячейки "24"
 
     await state.set_state(AdminHourGridStates.editing)
     await state.update_data(
         hgrid_date=date_str,
-        hgrid_active=list(active_hours),
+        hgrid_active=list(display_hours),
         hgrid_interval=interval_min,
-        hgrid_original=list(active_hours),
+        hgrid_original=list(slot_hours),   # реальные слот-часы для diff
     )
     await _show_hour_grid(callback.message, date_str, state, is_new_day=False)
 
@@ -1620,14 +1632,16 @@ async def handle_admin_sched_create_day(callback: CallbackQuery, state: FSMConte
     date_str = callback.data.split(":", 1)[1]
 
     rule = await db.get_default_schedule()
-    # Предзаполняем часы по стандарту (если есть), иначе пусто
+    # Предзаполняем часы по стандарту (если есть), иначе пусто.
+    # Включаем час закрытия: range(s, e+1) → последний ✅ = закрытие
     if rule:
         s, e = rule["start_hour"], rule["end_hour"]
         interval_min = rule["interval_min"]
         if e == 0:
+            # Стандарт «до полуночи»: 23:xx — последний слот, сетка 0-23 без ячейки 24
             active_hours = set(range(s, 24))
         else:
-            active_hours = set(range(s, e))
+            active_hours = set(range(s, e + 1))  # e включительно = час закрытия
     else:
         active_hours = set()
         interval_min = 60
@@ -1680,49 +1694,46 @@ async def handle_hgrid_save(callback: CallbackQuery, state: FSMContext):
     date_str = callback.data.split(":", 1)[1]
 
     fsm = await state.get_data()
-    new_hours = set(fsm.get("hgrid_active", []))
-    original_hours = set(fsm.get("hgrid_original", []))
+    new_display = set(fsm.get("hgrid_active", []))
+    original_slot_hours = set(fsm.get("hgrid_original", []))
     interval_min = fsm.get("hgrid_interval", 60)
 
-    if not new_hours:
-        await callback.answer("⚠️ Нужно выбрать хотя бы один час.", show_alert=True)
+    if len(new_display) < 2:
+        await callback.answer(
+            "⚠️ Выберите минимум 2 часа: первый — открытие, последний — закрытие.",
+            show_alert=True,
+        )
         return
 
-    # Часы для удаления (были, теперь нет)
-    hours_to_delete = original_hours - new_hours
-    # Часы для добавления (не было, теперь есть)
-    hours_to_add = new_hours - original_hours
+    # Последний ✅ час = время закрытия (эксклюзивный конец).
+    # Все остальные выбранные часы = часы, в которых есть слоты.
+    closing_hour = max(new_display)
+    new_slot_hours = new_display - {closing_hour}
 
+    # Вычисляем изменения
+    old_info = await db.get_day_schedule_info(date_str)
+    old_interval = old_info["interval_min"] if old_info else None
+    interval_changed = old_interval is not None and old_interval != interval_min
+    hours_changed = original_slot_hours != new_slot_hours
+
+    if not hours_changed and not interval_changed:
+        await callback.answer("Изменений нет.", show_alert=True)
+        return
+
+    # Полная пересборка: удалить все свободные слоты, создать новые
+    all_slots = await db.get_all_slots_for_date(date_str)
+    free_ids = [s["id"] for s in all_slots if s["is_available"]]
     deleted = 0
+    for sid in free_ids:
+        if await db.delete_slot_by_id(sid):
+            deleted += 1
+
     created = 0
-
-    if hours_to_delete:
-        deleted = await db.delete_slots_in_hours(date_str, hours_to_delete)
-
-    if hours_to_add:
-        # Создаём слоты для каждого нового часа
-        for h in sorted(hours_to_add):
-            start_time = f"{h:02d}:00"
-            end_time = f"{(h + 1) % 24:02d}:00" if h < 23 else "00:00"
-            result = await db.bulk_create_slots([date_str], start_time, end_time, interval_min)
-            created += result.get("created", 0)
-
-    # Если интервал изменился для существующих часов, пересоздаём их
-    if not hours_to_delete and not hours_to_add and interval_min != (
-        (await db.get_day_schedule_info(date_str) or {}).get("interval_min", interval_min)
-    ):
-        # Интервал изменился — удалить и пересоздать все незанятые слоты
-        hours_with_free = set()
-        all_slots = await db.get_all_slots_for_date(date_str)
-        for s in all_slots:
-            if s["is_available"]:
-                hours_with_free.add(int(s["slot_time"][:2]))
-        deleted += await db.delete_slots_in_hours(date_str, hours_with_free)
-        for h in sorted(new_hours):
-            start_time = f"{h:02d}:00"
-            end_time = f"{(h + 1) % 24:02d}:00" if h < 23 else "00:00"
-            result = await db.bulk_create_slots([date_str], start_time, end_time, interval_min)
-            created += result.get("created", 0)
+    for h in sorted(new_slot_hours):
+        start_time = f"{h:02d}:00"
+        end_time = f"{h + 1:02d}:00" if h < 23 else "00:00"
+        result = await db.bulk_create_slots([date_str], start_time, end_time, interval_min)
+        created += result.get("created", 0)
 
     await db.add_custom_day(date_str)
     await state.clear()

@@ -790,26 +790,27 @@ def get_hour_grid_keyboard(
 ) -> InlineKeyboardMarkup:
     """
     Сетка 24 часов для редактирования рабочего дня.
-    ✅ — час выбран (рабочий), ⬜ — не выбран.
-    Интервал выбирается внизу, затем кнопки сохранения/отмены.
+    Первый ✅ = открытие, последний ✅ = закрытие (слоты до него).
+    4 кнопки в ряд, формат HH:00.
     """
     builder = InlineKeyboardBuilder()
-    # 24 ячейки по 6 в ряд (4 ряда)
+    # 24 ячейки по 4 в ряд (6 рядов)
     for h in range(24):
         mark = "✅" if h in active_hours else "⬜"
         builder.button(
-            text=f"{mark}{h:02d}",
+            text=f"{mark}{h:02d}:00",
             callback_data=f"hgrid_toggle:{date_str}:{h}",
         )
-    builder.adjust(6)
-    # Интервал
-    for mins in [15, 30, 60]:
-        mark = "▶" if interval_min == mins else "  "
+    builder.adjust(4)
+    # Интервал между записями
+    for mins, label in [(15, "✅15 мин" if interval_min == 15 else "⬜15 мин"),
+                        (30, "✅30 мин" if interval_min == 30 else "⬜30 мин"),
+                        (60, "✅60 мин" if interval_min == 60 else "⬜60 мин")]:
         builder.button(
-            text=f"{mark}{mins}м",
+            text=label,
             callback_data=f"hgrid_interval:{date_str}:{mins}",
         )
-    builder.adjust(6, 6, 6, 6, 3)
+    builder.adjust(4, 4, 4, 4, 4, 4, 3)
     # Кнопки действий
     builder.row(
         InlineKeyboardButton(text="💾 Сохранить", callback_data=f"hgrid_save:{date_str}"),
