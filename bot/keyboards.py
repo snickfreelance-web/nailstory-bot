@@ -806,7 +806,7 @@ def get_slot_edit_keyboard(
             text="🗑 Удалить весь день", callback_data=f"edit_day_delete:{date_str}"
         ),
         InlineKeyboardButton(
-            text="← Другой день", callback_data="admin:schedule_edit"
+            text="❌ Отмена", callback_data=f"admin_ed_day_action:{date_str}"
         ),
     )
     return builder.as_markup()

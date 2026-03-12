@@ -325,6 +325,80 @@ def build_admin_bookings_calendar(
     return builder.as_markup()
 
 
+def build_admin_multiselect_calendar(
+    year: int,
+    month: int,
+    dates_with_slots: List[str],
+    selected_dates: List[str],
+) -> InlineKeyboardMarkup:
+    """
+    Календарь для мультивыбора дней в редакторе расписания.
+    Все будущие дни кликабельны.
+    Выбранные дни отмечены ✅, дни со слотами — 📅, остальные — число.
+
+    Callbacks:
+    - Навигация: admin_ed_ms_nav:{year}:{month}
+    - Выбрать день: admin_ed_ms_sel:{date}
+    - Снять выбор: admin_ed_ms_desel:{date}
+    - Применить: admin_ed_ms_apply
+    - Отмена: admin:schedule_edit
+    """
+    builder = InlineKeyboardBuilder()
+    today = date.today()
+    selected_set = set(selected_dates)
+
+    prev_month = month - 1 if month > 1 else 12
+    prev_year = year if month > 1 else year - 1
+    next_month = month + 1 if month < 12 else 1
+    next_year = year if month < 12 else year + 1
+
+    is_current_or_past_month = (year, month) <= (today.year, today.month)
+    if is_current_or_past_month:
+        builder.button(text=" ", callback_data="cal_ignore")
+    else:
+        builder.button(text="◀", callback_data=f"admin_ed_ms_nav:{prev_year}:{prev_month}")
+    builder.button(text=f"{MONTHS_RU[month]} {year}", callback_data="cal_ignore")
+    builder.button(text="▶", callback_data=f"admin_ed_ms_nav:{next_year}:{next_month}")
+    builder.adjust(3)
+
+    for day_name in WEEKDAYS:
+        builder.button(text=day_name, callback_data="cal_ignore")
+
+    month_calendar = calendar.monthcalendar(year, month)
+    for week in month_calendar:
+        for day_num in week:
+            if day_num == 0:
+                builder.button(text=" ", callback_data="cal_ignore")
+            else:
+                day_str = f"{year:04d}-{month:02d}-{day_num:02d}"
+                day_date = date(year, month, day_num)
+                is_past = day_date <= today
+                if is_past:
+                    builder.button(text=str(day_num), callback_data="cal_ignore")
+                elif day_str in selected_set:
+                    builder.button(text=f"✅{day_num}", callback_data=f"admin_ed_ms_desel:{day_str}")
+                elif day_str in dates_with_slots:
+                    builder.button(text=f"📅{day_num}", callback_data=f"admin_ed_ms_sel:{day_str}")
+                else:
+                    builder.button(text=str(day_num), callback_data=f"admin_ed_ms_sel:{day_str}")
+
+    row_widths = [3, 7] + [7] * len(month_calendar)
+    builder.adjust(*row_widths)
+
+    n = len(selected_set)
+    if n > 0:
+        builder.row(InlineKeyboardButton(
+            text=f"✅ Применить к выбранным ({n})",
+            callback_data="admin_ed_ms_apply",
+        ))
+    builder.row(InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data="admin:schedule_edit",
+    ))
+
+    return builder.as_markup()
+
+
 def get_current_month_year():
     """
     Возвращает текущий год и месяц.

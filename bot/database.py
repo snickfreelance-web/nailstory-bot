@@ -1070,11 +1070,59 @@ async def apply_default_schedule_for_months(months_ahead: int = 3) -> Dict:
     )
 
 
+async def get_day_schedule_info(date_str: str) -> Optional[Dict]:
+    """
+    Возвращает информацию о расписании на конкретный день:
+    start, end (последний слот), end_exclusive, interval_min, total, free.
+    Используется для продления дня и смены интервала.
+    """
+    try:
+        response = (
+            supabase.table("time_slots")
+            .select("slot_time,is_available")
+            .eq("slot_date", date_str)
+            .order("slot_time")
+            .execute()
+        )
+        slots = response.data or []
+        if not slots:
+            return None
+
+        all_times = sorted(s["slot_time"][:5] for s in slots)
+        free_times = [s["slot_time"][:5] for s in slots if s["is_available"]]
+
+        start = all_times[0]
+        end = all_times[-1]
+
+        interval_min = 30  # умолчание
+        if len(all_times) >= 2:
+            t1 = datetime.strptime(all_times[0], "%H:%M")
+            t2 = datetime.strptime(all_times[1], "%H:%M")
+            diff = int((t2 - t1).total_seconds() / 60)
+            if diff > 0:
+                interval_min = diff
+
+        last_dt = datetime.strptime(end, "%H:%M")
+        end_exclusive = (last_dt + timedelta(minutes=interval_min)).strftime("%H:%M")
+
+        return {
+            "start": start,
+            "end": end,
+            "end_exclusive": end_exclusive,
+            "interval_min": interval_min,
+            "total": len(all_times),
+            "free": len(free_times),
+        }
+    except Exception as e:
+        logger.error(f"Ошибка получения инфо о дне {date_str}: {e}")
+        return None
+
+
 async def reset_default_schedule_slots() -> Dict:
     """
     При смене стандартного расписания:
     1. Удаляет все свободные слоты в будущем, которые не в custom_days
-    2. Пересоздаёт по новому правилу на 3 месяца вперёд
+    2. Пересоздаёт по новому правилу на 24 месяца вперёд
 
     Вызывается ПОСЛЕ save_default_schedule().
     """
@@ -1103,5 +1151,5 @@ async def reset_default_schedule_slots() -> Dict:
     except Exception as e:
         logger.error(f"Ошибка удаления слотов при смене стандарта: {e}")
 
-    # Создаём слоты по новому правилу
-    return await apply_default_schedule_for_months(3)
+    # Создаём слоты по новому правилу на 24 месяца вперёд
+    return await apply_default_schedule_for_months(24)
