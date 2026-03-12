@@ -341,7 +341,11 @@ async def bulk_create_slots(
         {"created": N, "skipped": N}
     """
     start_dt = datetime.strptime(start_time, "%H:%M")
-    end_dt = datetime.strptime(end_time, "%H:%M")
+    # end_time="00:00" означает «до полуночи» (конец суток)
+    if end_time == "00:00":
+        end_dt = start_dt.replace(hour=0, minute=0) + timedelta(days=1)
+    else:
+        end_dt = datetime.strptime(end_time, "%H:%M")
     delta = timedelta(minutes=interval_min)
 
     # Собираем все слоты для генерации
@@ -1115,7 +1119,11 @@ async def get_day_schedule_info(date_str: str) -> Optional[Dict]:
                 interval_min = diff
 
         last_dt = datetime.strptime(end, "%H:%M")
-        end_exclusive = (last_dt + timedelta(minutes=interval_min)).strftime("%H:%M")
+        end_exclusive_dt = last_dt + timedelta(minutes=interval_min)
+        if end_exclusive_dt.day != last_dt.day:
+            end_exclusive = "24:00"
+        else:
+            end_exclusive = end_exclusive_dt.strftime("%H:%M")
 
         return {
             "start": start,
@@ -1128,6 +1136,79 @@ async def get_day_schedule_info(date_str: str) -> Optional[Dict]:
     except Exception as e:
         logger.error(f"Ошибка получения инфо о дне {date_str}: {e}")
         return None
+
+
+async def clear_non_custom_future_slots() -> Dict:
+    """
+    Удаляет все будущие свободные слоты, кроме custom-дней (ручных правок).
+    Используется при смене режима расписания.
+    """
+    today = date.today()
+    custom = await get_custom_days()
+    try:
+        response = (
+            supabase.table("time_slots")
+            .select("id,slot_date")
+            .eq("is_available", True)
+            .gte("slot_date", today.isoformat())
+            .execute()
+        )
+        ids_to_delete = [
+            row["id"] for row in (response.data or [])
+            if row["slot_date"] not in custom
+        ]
+        if ids_to_delete:
+            batch_size = 100
+            for i in range(0, len(ids_to_delete), batch_size):
+                supabase.table("time_slots").delete().in_(
+                    "id", ids_to_delete[i:i + batch_size]
+                ).execute()
+        return {"deleted": len(ids_to_delete)}
+    except Exception as e:
+        logger.error(f"Ошибка очистки слотов при смене режима: {e}")
+        return {"error": str(e)}
+
+
+async def get_active_hours_for_date(date_str: str) -> set:
+    """Возвращает множество часов (int 0-23), в которых есть хотя бы один слот."""
+    try:
+        response = (
+            supabase.table("time_slots")
+            .select("slot_time")
+            .eq("slot_date", date_str)
+            .execute()
+        )
+        return {int(row["slot_time"][:2]) for row in (response.data or [])}
+    except Exception as e:
+        logger.error(f"Ошибка получения активных часов для {date_str}: {e}")
+        return set()
+
+
+async def delete_slots_in_hours(date_str: str, hours: set) -> int:
+    """Удаляет все слоты в указанных часах для даты. Возвращает число удалённых."""
+    if not hours:
+        return 0
+    try:
+        response = (
+            supabase.table("time_slots")
+            .select("id,slot_time")
+            .eq("slot_date", date_str)
+            .execute()
+        )
+        ids_to_delete = [
+            row["id"] for row in (response.data or [])
+            if int(row["slot_time"][:2]) in hours
+        ]
+        if ids_to_delete:
+            batch_size = 100
+            for i in range(0, len(ids_to_delete), batch_size):
+                supabase.table("time_slots").delete().in_(
+                    "id", ids_to_delete[i:i + batch_size]
+                ).execute()
+        return len(ids_to_delete)
+    except Exception as e:
+        logger.error(f"Ошибка удаления слотов по часам для {date_str}: {e}")
+        return 0
 
 
 async def reset_default_schedule_slots() -> Dict:

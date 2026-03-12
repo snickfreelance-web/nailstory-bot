@@ -762,20 +762,64 @@ def get_hour_keyboard(
     hours: list,
     cb_prefix: str,
     cancel_cb: str = "admin:schedule",
+    special_labels: dict = None,
 ) -> InlineKeyboardMarkup:
     """
     Универсальная клавиатура выбора часа.
 
     Args:
-        hours: Список доступных часов [8, 9, 10, ...]
-        cb_prefix: Префикс callback_data (rule_start / rule_end)
+        hours: Список доступных часов [0..23, ...]
+        cb_prefix: Префикс callback_data
         cancel_cb: callback_data для кнопки «← Назад»
+        special_labels: dict {hour: "label"} для переопределения текста кнопки
     """
     builder = InlineKeyboardBuilder()
     for h in hours:
-        builder.button(text=f"{h:02d}:00", callback_data=f"{cb_prefix}:{h}")
+        label = (special_labels or {}).get(h, f"{h:02d}:00")
+        builder.button(text=label, callback_data=f"{cb_prefix}:{h}")
     builder.adjust(4)
     builder.row(InlineKeyboardButton(text="← Назад", callback_data=cancel_cb))
+    return builder.as_markup()
+
+
+def get_hour_grid_keyboard(
+    date_str: str,
+    active_hours: set,
+    interval_min: int,
+    is_new_day: bool = False,
+) -> InlineKeyboardMarkup:
+    """
+    Сетка 24 часов для редактирования рабочего дня.
+    ✅ — час выбран (рабочий), ⬜ — не выбран.
+    Интервал выбирается внизу, затем кнопки сохранения/отмены.
+    """
+    builder = InlineKeyboardBuilder()
+    # 24 ячейки по 6 в ряд (4 ряда)
+    for h in range(24):
+        mark = "✅" if h in active_hours else "⬜"
+        builder.button(
+            text=f"{mark}{h:02d}",
+            callback_data=f"hgrid_toggle:{date_str}:{h}",
+        )
+    builder.adjust(6)
+    # Интервал
+    for mins in [15, 30, 60]:
+        mark = "▶" if interval_min == mins else "  "
+        builder.button(
+            text=f"{mark}{mins}м",
+            callback_data=f"hgrid_interval:{date_str}:{mins}",
+        )
+    builder.adjust(6, 6, 6, 6, 3)
+    # Кнопки действий
+    builder.row(
+        InlineKeyboardButton(text="💾 Сохранить", callback_data=f"hgrid_save:{date_str}"),
+        InlineKeyboardButton(text="← Отмена", callback_data=f"admin_sched_view_date:{date_str}"),
+    )
+    if not is_new_day:
+        builder.row(
+            InlineKeyboardButton(text="🗑 Удалить весь день", callback_data=f"hgrid_delete:{date_str}"),
+        )
+    builder.row(InlineKeyboardButton(text="◀ К расписанию", callback_data="admin:schedule"))
     return builder.as_markup()
 
 

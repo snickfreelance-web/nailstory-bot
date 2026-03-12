@@ -17,7 +17,7 @@ from bot.states import (
     AdminServiceStates, AdminSlotStates, AdminRescheduleStates,
     AdminBookingStates, AdminMgmtStates,
     AdminScheduleRuleStates, AdminScheduleEditStates, AdminDefaultScheduleStates,
-    AdminScheduleModeStates,
+    AdminScheduleModeStates, AdminHourGridStates,
 )
 from bot.keyboards import (
     get_admin_main_keyboard,
@@ -31,6 +31,7 @@ from bot.keyboards import (
     get_admin_pagination_keyboard,
     get_admin_schedule_keyboard,
     get_schedule_mode_choice_keyboard,
+    get_hour_grid_keyboard,
     get_admin_time_slots_keyboard,
     get_admin_slots_list_keyboard,
     get_admin_admins_keyboard,
@@ -58,6 +59,16 @@ from bot import database as db
 logger = logging.getLogger(__name__)
 
 BOOKINGS_PER_PAGE = 8
+
+
+def _fmt_end_hour(h: int) -> str:
+    """Форматирует конечный час расписания. end_hour=0 означает полночь (24:00)."""
+    return "24:00" if h == 0 else f"{h:02d}:00"
+
+
+def _fmt_schedule_range(start_h: int, end_h: int) -> str:
+    """Форматирует диапазон рабочих часов. end_hour=0 → 24:00."""
+    return f"{start_h:02d}:00–{_fmt_end_hour(end_h)}"
 
 
 # ===================================================
@@ -1401,7 +1412,7 @@ async def _show_schedule_view_calendar(
             wd_list = " ".join(n for i, n in enumerate(wd_names) if rule["weekdays_mask"] & (1 << i))
             standard_label = (
                 f"⚙️ Стандарт: {wd_list} · "
-                f"{rule['start_hour']:02d}:00–{rule['end_hour']:02d}:00 · {rule['interval_min']} мин"
+                f"{_fmt_schedule_range(rule['start_hour'], rule['end_hour'])} · {rule['interval_min']} мин"
             )
             kb.inline_keyboard.append(
                 [InlineKeyboardButton(text=standard_label, callback_data="admin:default_schedule")]
@@ -1468,14 +1479,20 @@ async def handle_sched_mode_choice(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(
             f"🔄 <b>Смена режима расписания</b>\n\n"
             f"Текущий режим: <b>{labels.get(current, current)}</b>\n\n"
-            "⚠️ При смене режима существующие слоты не удаляются.",
+            "⚠️ При смене режима все будущие слоты (кроме созданных вручную) "
+            "будут удалены и пересозданы по новому правилу.",
             reply_markup=builder.as_markup(),
             parse_mode="HTML",
         )
         return
 
+    current_mode = await db.get_setting("schedule_mode")
+
     if action == "standard":
         await db.set_setting("schedule_mode", "standard")
+        if current_mode != "standard":
+            await callback.message.edit_text("⏳ Очищаю слоты и пересчитываю...", parse_mode="HTML")
+            await db.clear_non_custom_future_slots()
         rule = await db.get_default_schedule()
         if not rule:
             # Нет стандарта — запускаем мастер настройки
@@ -1488,11 +1505,16 @@ async def handle_sched_mode_choice(callback: CallbackQuery, state: FSMContext):
                 parse_mode="HTML",
             )
             return
+        # Есть правило — регенерируем слоты
+        await db.reset_default_schedule_slots()
         year, month = get_current_month_year()
         await _show_schedule_view_calendar(callback.message, year, month, mode="standard")
 
     elif action == "monthly":
         await db.set_setting("schedule_mode", "monthly")
+        if current_mode != "monthly":
+            await callback.message.edit_text("⏳ Очищаю слоты...", parse_mode="HTML")
+            await db.clear_non_custom_future_slots()
         year, month = get_current_month_year()
         await _show_schedule_view_calendar(callback.message, year, month, mode="monthly")
 
@@ -1527,7 +1549,7 @@ async def handle_admin_sched_view_date(callback: CallbackQuery, state: FSMContex
         info_str = ""
         if info:
             info_str = (
-                f"\n🕐 <b>{info['start']} – {info['end']}</b>\n"
+                f"\n🕐 <b>{info['start']} – {info['end_exclusive']}</b>\n"
                 f"⏱ Интервал: {info['interval_min']} мин\n"
             )
         text = (
@@ -1535,53 +1557,209 @@ async def handle_admin_sched_view_date(callback: CallbackQuery, state: FSMContex
             f"{info_str}\n"
             f"Слотов: {len(slots)} (свободных: {free}, занято: {booked})"
         )
-        builder.button(text="✏️ Редактировать день", callback_data=f"admin_sched_edit_day:{date_str}")
+        builder.button(text="✏️ Редактировать часы", callback_data=f"admin_sched_edit_day:{date_str}")
     else:
         text = f"📅 <b>{format_date_ru(date_str)}</b>\n\nРабочий день не создан."
         builder.button(text="➕ Создать рабочий день", callback_data=f"admin_sched_create_day:{date_str}")
 
-    builder.button(text="← К расписанию", callback_data=f"admin_sched_view_nav:{year}:{month}")
+    builder.button(text="← К расписанию", callback_data="admin:schedule")
     builder.button(text="◀ Главное меню", callback_data="admin:main")
     builder.adjust(1)
 
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
+async def _show_hour_grid(message, date_str: str, state: FSMContext, is_new_day: bool = False):
+    """Показывает сетку 24 часов для редактирования рабочего дня."""
+    fsm = await state.get_data()
+    active_hours = set(fsm.get("hgrid_active", []))
+    interval_min = fsm.get("hgrid_interval", 60)
+    info = await db.get_day_schedule_info(date_str)
+
+    if info:
+        time_hint = f"🕐 {info['start']} – {info['end_exclusive']} · {info['interval_min']} мин\n"
+    else:
+        time_hint = ""
+
+    action = "новый день" if is_new_day else "редактирование"
+    await message.edit_text(
+        text=(
+            f"📅 <b>{format_date_ru(date_str)}</b> — {action}\n\n"
+            f"{time_hint}"
+            "Выберите рабочие часы (✅ — включён, ⬜ — выключен):"
+        ),
+        reply_markup=get_hour_grid_keyboard(date_str, active_hours, interval_min, is_new_day),
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(F.data.startswith("admin_sched_edit_day:"))
 async def handle_admin_sched_edit_day(callback: CallbackQuery, state: FSMContext):
-    """Из просмотра дня → меню действий редактора для этого дня."""
+    """Из просмотра дня → сетка часов для редактирования."""
     await callback.answer()
     date_str = callback.data.split(":", 1)[1]
-    await state.set_state(AdminScheduleEditStates.waiting_date)
-    await _show_day_action_menu(callback.message, date_str, state)
+
+    active_hours = await db.get_active_hours_for_date(date_str)
+    info = await db.get_day_schedule_info(date_str)
+    interval_min = info["interval_min"] if info else 60
+
+    await state.set_state(AdminHourGridStates.editing)
+    await state.update_data(
+        hgrid_date=date_str,
+        hgrid_active=list(active_hours),
+        hgrid_interval=interval_min,
+        hgrid_original=list(active_hours),
+    )
+    await _show_hour_grid(callback.message, date_str, state, is_new_day=False)
 
 
 @router.callback_query(F.data.startswith("admin_sched_create_day:"))
 async def handle_admin_sched_create_day(callback: CallbackQuery, state: FSMContext):
-    """Из просмотра пустого дня → создать рабочий день."""
+    """Из просмотра пустого дня → сетка часов для нового дня."""
     await callback.answer()
     date_str = callback.data.split(":", 1)[1]
-    await state.set_state(AdminScheduleEditStates.day_waiting_start)
-    await state.update_data(edit_date=date_str)
 
     rule = await db.get_default_schedule()
-    builder = InlineKeyboardBuilder()
+    # Предзаполняем часы по стандарту (если есть), иначе пусто
     if rule:
-        builder.button(
-            text=f"✅ По стандарту ({rule['start_hour']:02d}:00–{rule['end_hour']:02d}:00, {rule['interval_min']} мин)",
-            callback_data=f"ed_day_default:{date_str}",
-        )
-    builder.button(text="⚙️ Настроить вручную", callback_data="ed_day_manual")
-    year, month = int(date_str[:4]), int(date_str[5:7])
-    builder.button(text="← К расписанию", callback_data=f"admin_sched_view_nav:{year}:{month}")
-    builder.button(text="◀ Главное меню", callback_data="admin:main")
-    builder.adjust(1)
+        s, e = rule["start_hour"], rule["end_hour"]
+        interval_min = rule["interval_min"]
+        if e == 0:
+            active_hours = set(range(s, 24))
+        else:
+            active_hours = set(range(s, e))
+    else:
+        active_hours = set()
+        interval_min = 60
 
-    await callback.message.edit_text(
-        text=f"📅 <b>{format_date_ru(date_str)}</b> — рабочий день не создан.\n\nКак создать слоты?",
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML",
+    await state.set_state(AdminHourGridStates.editing)
+    await state.update_data(
+        hgrid_date=date_str,
+        hgrid_active=list(active_hours),
+        hgrid_interval=interval_min,
+        hgrid_original=[],
     )
+    await _show_hour_grid(callback.message, date_str, state, is_new_day=True)
+
+
+@router.callback_query(AdminHourGridStates.editing, F.data.startswith("hgrid_toggle:"))
+async def handle_hgrid_toggle(callback: CallbackQuery, state: FSMContext):
+    """Тоггл часа в сетке."""
+    await callback.answer()
+    parts = callback.data.split(":")
+    date_str = parts[1]
+    hour = int(parts[2])
+
+    fsm = await state.get_data()
+    active = set(fsm.get("hgrid_active", []))
+    if hour in active:
+        active.discard(hour)
+    else:
+        active.add(hour)
+    await state.update_data(hgrid_active=list(active))
+    await _show_hour_grid(callback.message, date_str, state, is_new_day=not fsm.get("hgrid_original"))
+
+
+@router.callback_query(AdminHourGridStates.editing, F.data.startswith("hgrid_interval:"))
+async def handle_hgrid_interval(callback: CallbackQuery, state: FSMContext):
+    """Смена интервала в сетке."""
+    await callback.answer()
+    parts = callback.data.split(":")
+    date_str = parts[1]
+    interval_min = int(parts[2])
+
+    fsm = await state.get_data()
+    await state.update_data(hgrid_interval=interval_min)
+    await _show_hour_grid(callback.message, date_str, state, is_new_day=not fsm.get("hgrid_original"))
+
+
+@router.callback_query(AdminHourGridStates.editing, F.data.startswith("hgrid_save:"))
+async def handle_hgrid_save(callback: CallbackQuery, state: FSMContext):
+    """Сохранить изменения из сетки часов."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+
+    fsm = await state.get_data()
+    new_hours = set(fsm.get("hgrid_active", []))
+    original_hours = set(fsm.get("hgrid_original", []))
+    interval_min = fsm.get("hgrid_interval", 60)
+
+    if not new_hours:
+        await callback.answer("⚠️ Нужно выбрать хотя бы один час.", show_alert=True)
+        return
+
+    # Часы для удаления (были, теперь нет)
+    hours_to_delete = original_hours - new_hours
+    # Часы для добавления (не было, теперь есть)
+    hours_to_add = new_hours - original_hours
+
+    deleted = 0
+    created = 0
+
+    if hours_to_delete:
+        deleted = await db.delete_slots_in_hours(date_str, hours_to_delete)
+
+    if hours_to_add:
+        # Создаём слоты для каждого нового часа
+        for h in sorted(hours_to_add):
+            start_time = f"{h:02d}:00"
+            end_time = f"{(h + 1) % 24:02d}:00" if h < 23 else "00:00"
+            result = await db.bulk_create_slots([date_str], start_time, end_time, interval_min)
+            created += result.get("created", 0)
+
+    # Если интервал изменился для существующих часов, пересоздаём их
+    if not hours_to_delete and not hours_to_add and interval_min != (
+        (await db.get_day_schedule_info(date_str) or {}).get("interval_min", interval_min)
+    ):
+        # Интервал изменился — удалить и пересоздать все незанятые слоты
+        hours_with_free = set()
+        all_slots = await db.get_all_slots_for_date(date_str)
+        for s in all_slots:
+            if s["is_available"]:
+                hours_with_free.add(int(s["slot_time"][:2]))
+        deleted += await db.delete_slots_in_hours(date_str, hours_with_free)
+        for h in sorted(new_hours):
+            start_time = f"{h:02d}:00"
+            end_time = f"{(h + 1) % 24:02d}:00" if h < 23 else "00:00"
+            result = await db.bulk_create_slots([date_str], start_time, end_time, interval_min)
+            created += result.get("created", 0)
+
+    await db.add_custom_day(date_str)
+    await state.clear()
+
+    year, month = int(date_str[:4]), int(date_str[5:7])
+    await callback.answer(
+        f"✅ Сохранено: +{created} слотов, -{deleted} удалено",
+        show_alert=True,
+    )
+    await _show_schedule_view_calendar(callback.message, year, month)
+
+
+@router.callback_query(AdminHourGridStates.editing, F.data.startswith("hgrid_delete:"))
+async def handle_hgrid_delete(callback: CallbackQuery, state: FSMContext):
+    """Удалить весь рабочий день из сетки."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+
+    slots = await db.get_all_slots_for_date(date_str)
+    booked = [s for s in slots if not s["is_available"]]
+    if booked:
+        await callback.answer(
+            f"❌ Нельзя удалить: есть {len(booked)} забронированных записей.",
+            show_alert=True,
+        )
+        return
+
+    # Удаляем все слоты
+    for s in slots:
+        await db.delete_slot_by_id(s["id"])
+
+    await db.add_custom_day(date_str)
+    await state.clear()
+
+    year, month = int(date_str[:4]), int(date_str[5:7])
+    await callback.answer("✅ День удалён.", show_alert=True)
+    await _show_schedule_view_calendar(callback.message, year, month)
 
 
 @router.callback_query(F.data == "admin_sched:add_day")
@@ -2436,7 +2614,7 @@ async def handle_weekday_done(callback: CallbackQuery, state: FSMContext):
             "📅 <b>Создать расписание на месяц</b>\n\n"
             "Шаг 2 из 4 — Выберите <b>время начала</b> рабочего дня:"
         ),
-        reply_markup=get_hour_keyboard(list(range(7, 21)), "rule_start", "admin:schedule_rule"),
+        reply_markup=get_hour_keyboard(list(range(0, 24)), "rule_start", "admin:schedule_rule"),
         parse_mode="HTML",
     )
 
@@ -2455,7 +2633,11 @@ async def handle_rule_start_time(callback: CallbackQuery, state: FSMContext):
             f"Начало: <b>{hour:02d}:00</b>\n\n"
             "Шаг 3 из 4 — Выберите <b>время окончания</b> рабочего дня:"
         ),
-        reply_markup=get_hour_keyboard(list(range(hour + 1, 24)), "rule_end", "admin:schedule_rule"),
+        reply_markup=get_hour_keyboard(
+            list(range(hour + 1, 24)) + ([0] if hour > 0 else []),
+            "rule_end", "admin:schedule_rule",
+            special_labels={0: "00 (полночь)"},
+        ),
         parse_mode="HTML",
     )
 
@@ -2637,7 +2819,7 @@ async def _show_schedule_edit_calendar(message, year: int, month: int, edit: boo
         wd_list = " ".join(n for i, n in enumerate(wd_names) if rule["weekdays_mask"] & (1 << i))
         hint += (
             f"\n\n⚙️ <b>Стандарт:</b> {wd_list} · "
-            f"{rule['start_hour']:02d}:00–{rule['end_hour']:02d}:00 · "
+            f"{_fmt_schedule_range(rule['start_hour'], rule['end_hour'])} · "
             f"{rule['interval_min']} мин"
         )
 
@@ -2694,7 +2876,7 @@ async def _show_day_action_menu(message, date_str: str, state: FSMContext):
 
     info_line = ""
     if info:
-        info_line = f"\n🕐 {info['start']} – {info['end']} · {info['interval_min']} мин"
+        info_line = f"\n🕐 {info['start']} – {info['end_exclusive']} · {info['interval_min']} мин"
 
     year, month = int(date_str[:4]), int(date_str[5:7])
 
@@ -2740,7 +2922,7 @@ async def handle_admin_ed_cal_date(callback: CallbackQuery, state: FSMContext):
         builder = InlineKeyboardBuilder()
         if rule:
             builder.button(
-                text=f"✅ По стандарту ({rule['start_hour']:02d}:00–{rule['end_hour']:02d}:00, {rule['interval_min']} мин)",
+                text=f"✅ По стандарту ({_fmt_schedule_range(rule['start_hour'], rule['end_hour'])}, {rule['interval_min']} мин)",
                 callback_data=f"ed_day_default:{date_str}",
             )
         builder.button(text="⚙️ Настроить вручную", callback_data="ed_day_manual")
@@ -2836,24 +3018,10 @@ async def handle_edit_slot_save(callback: CallbackQuery, state: FSMContext):
             deleted += 1
 
     await db.add_custom_day(date_str)
-    await state.update_data(removed_ids=[])
-    slots = await db.get_all_slots_for_date(date_str)
-
-    if slots:
-        await callback.message.edit_text(
-            text=(
-                f"✅ Удалено слотов: <b>{deleted}</b>\n\n"
-                f"✏️ <b>Редактирование: {format_date_ru(date_str)}</b>\n\n"
-                "✅ — активен  🔒 — занят (нельзя удалить)"
-            ),
-            reply_markup=get_slot_edit_keyboard(slots, set(), date_str),
-            parse_mode="HTML",
-        )
-    else:
-        await state.set_state(AdminScheduleEditStates.waiting_date)
-        year, month = int(date_str[:4]), int(date_str[5:7])
-        await callback.answer(f"День {format_date_ru(date_str)} теперь пуст.", show_alert=True)
-        await _show_schedule_edit_calendar(callback.message, year, month)
+    await state.clear()
+    year, month = int(date_str[:4]), int(date_str[5:7])
+    await callback.answer(f"✅ Сохранено, удалено слотов: {deleted}", show_alert=True)
+    await _show_schedule_view_calendar(callback.message, year, month)
 
 
 @router.callback_query(
@@ -3281,7 +3449,7 @@ async def handle_ed_multi_add(callback: CallbackQuery, state: FSMContext):
             f"➕ <b>Добавить слоты в {n} {_plural_days(n)}</b>\n\n"
             "Шаг 1 из 3 — Выберите <b>время начала</b>:"
         ),
-        reply_markup=get_hour_keyboard(list(range(6, 23)), "ed_day_start", "admin:schedule_edit"),
+        reply_markup=get_hour_keyboard(list(range(0, 24)), "ed_day_start", "admin:schedule_edit"),
         parse_mode="HTML",
     )
 
@@ -3417,7 +3585,7 @@ async def handle_ed_day_manual(callback: CallbackQuery, state: FSMContext):
             f"📅 <b>{format_date_ru(date_str)}</b>\n\n"
             "Шаг 1 из 3 — Выберите <b>время начала</b> рабочего дня:"
         ),
-        reply_markup=get_hour_keyboard(list(range(6, 23)), "ed_day_start", "admin:schedule_edit"),
+        reply_markup=get_hour_keyboard(list(range(0, 24)), "ed_day_start", "admin:schedule_edit"),
         parse_mode="HTML",
     )
 
@@ -3438,7 +3606,11 @@ async def handle_ed_day_start(callback: CallbackQuery, state: FSMContext):
             f"Начало: <b>{hour:02d}:00</b>\n\n"
             "Шаг 2 из 3 — Выберите <b>время окончания</b>:"
         ),
-        reply_markup=get_hour_keyboard(list(range(hour + 1, 24)), "ed_day_end", "admin:schedule_edit"),
+        reply_markup=get_hour_keyboard(
+            list(range(hour + 1, 24)) + ([0] if hour > 0 else []),
+            "ed_day_end", "admin:schedule_edit",
+            special_labels={0: "00 (полночь)"},
+        ),
         parse_mode="HTML",
     )
 
@@ -3522,7 +3694,7 @@ def _format_default_schedule_text(rule: dict) -> str:
     wd_list = " ".join(n for i, n in enumerate(wd_names) if rule["weekdays_mask"] & (1 << i))
     return (
         f"📅 <b>Дни:</b> {wd_list}\n"
-        f"🕐 <b>Время:</b> {rule['start_hour']:02d}:00 – {rule['end_hour']:02d}:00\n"
+        f"🕐 <b>Время:</b> {_fmt_schedule_range(rule['start_hour'], rule['end_hour'])}\n"
         f"⏱ <b>Интервал:</b> {rule['interval_min']} мин\n\n"
         "Слоты генерируются автоматически при открытии редактора расписания."
     )
@@ -3621,7 +3793,7 @@ async def handle_default_wd_done(callback: CallbackQuery, state: FSMContext):
             f"Дни: <b>{wd_str}</b>\n\n"
             "Шаг 2 из 4 — Выберите <b>время начала</b> рабочего дня:"
         ),
-        reply_markup=get_hour_keyboard(list(range(6, 23)), "default_start", "admin:default_schedule"),
+        reply_markup=get_hour_keyboard(list(range(0, 24)), "default_start", "admin:default_schedule"),
         parse_mode="HTML",
     )
 
@@ -3640,7 +3812,11 @@ async def handle_default_start_time(callback: CallbackQuery, state: FSMContext):
             f"Начало: <b>{hour:02d}:00</b>\n\n"
             "Шаг 3 из 4 — Выберите <b>время окончания</b>:"
         ),
-        reply_markup=get_hour_keyboard(list(range(hour + 1, 24)), "default_end", "admin:default_schedule"),
+        reply_markup=get_hour_keyboard(
+            list(range(hour + 1, 24)) + ([0] if hour > 0 else []),
+            "default_end", "admin:default_schedule",
+            special_labels={0: "00 (полночь)"},
+        ),
         parse_mode="HTML",
     )
 
@@ -3720,7 +3896,7 @@ async def handle_default_interval(callback: CallbackQuery, state: FSMContext):
         text=(
             "✅ <b>Стандартное расписание сохранено</b>\n\n"
             f"📅 Дни: <b>{wd_str}</b>\n"
-            f"🕐 Время: <b>{start_hour:02d}:00 – {end_hour:02d}:00</b>\n"
+            f"🕐 Время: <b>{_fmt_schedule_range(start_hour, end_hour)}</b>\n"
             f"⏱ Интервал: <b>{interval_min} мин</b>\n\n"
             f"Добавлено слотов: <b>{result.get('created', 0)}</b>\n"
             f"Уже существовало: <b>{result.get('skipped', 0)}</b>"
