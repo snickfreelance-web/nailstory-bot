@@ -3981,7 +3981,7 @@ async def handle_sched_test_clear(callback: CallbackQuery, state: FSMContext):
 
     # 3. Удалить все custom_days
     try:
-        db.supabase.table("custom_days").delete().neq("date", "0000-00-00").execute()
+        db.supabase.table("custom_days").delete().gte("date", "2000-01-01").execute()
     except Exception as e:
         logger.error(f"[ТЕСТ] Ошибка удаления custom_days: {e}")
 
