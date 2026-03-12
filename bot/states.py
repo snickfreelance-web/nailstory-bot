@@ -123,10 +123,12 @@ class AdminRescheduleStates(StatesGroup):
 
 class AdminScheduleRuleStates(StatesGroup):
     """4-шаговый мастер создания расписания на месяц по правилу."""
-    waiting_weekdays = State()    # Шаг 1: выбор дней недели (тогглы)
-    waiting_start_time = State()  # Шаг 2: время начала
-    waiting_end_time = State()    # Шаг 3: время окончания
-    waiting_interval = State()    # Шаг 4: интервал (15/30/60 мин)
+    waiting_weekdays = State()         # Шаг 1: выбор дней недели (тогглы)
+    waiting_start_time = State()       # Шаг 2: время начала
+    waiting_end_time = State()         # Шаг 3: время окончания
+    waiting_interval = State()         # Шаг 4: тогл интервала + «Применить»
+    waiting_custom_interval = State()  # Шаг 4b: ввод своего значения интервала
+    confirm_custom = State()           # Шаг 5: подтверждение кастомных дней
 
 
 # ===================================================
@@ -167,10 +169,12 @@ class AdminScheduleEditStates(StatesGroup):
 
 class AdminDefaultScheduleStates(StatesGroup):
     """4-шаговый мастер задания стандартного расписания."""
-    waiting_weekdays = State()    # Шаг 1: дни недели (тогглы)
-    waiting_start_time = State()  # Шаг 2: время начала
-    waiting_end_time = State()    # Шаг 3: время окончания
-    waiting_interval = State()    # Шаг 4: интервал (15/30/60 мин)
+    waiting_weekdays = State()         # Шаг 1: дни недели (тогглы)
+    waiting_start_time = State()       # Шаг 2: время начала
+    waiting_end_time = State()         # Шаг 3: время окончания
+    waiting_interval = State()         # Шаг 4: тогл интервала + «Применить»
+    waiting_custom_interval = State()  # Шаг 4b: ввод своего значения интервала
+    confirm_custom = State()           # Шаг 5: подтверждение кастомных дней
 
 
 class AdminHourGridStates(StatesGroup):

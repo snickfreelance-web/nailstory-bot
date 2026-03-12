@@ -5,7 +5,7 @@
 import logging
 import calendar as cal_module
 from datetime import date
-from aiogram import Router, F, BaseMiddleware
+from aiogram import Router, F, Bot, BaseMiddleware
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, TelegramObject, InlineKeyboardButton
@@ -39,6 +39,8 @@ from bot.keyboards import (
     get_weekday_keyboard,
     get_hour_keyboard,
     get_slot_edit_keyboard,
+    get_interval_select_keyboard,
+    get_custom_conflict_keyboard,
 )
 from bot.utils.validators import (
     format_date_ru,
@@ -1490,35 +1492,112 @@ async def handle_sched_mode_choice(callback: CallbackQuery, state: FSMContext):
 
     current_mode = await db.get_setting("schedule_mode")
 
+    # Проверяем наличие кастомных дней перед сменой режима
+    if action in ("standard", "monthly") and action != current_mode:
+        custom_days = await db.get_custom_days()
+        if custom_days:
+            conflicts = []
+            for d_str in sorted(custom_days):
+                info = await db.get_day_schedule_info(d_str)
+                conflicts.append((d_str, info))
+
+            keep_set = {d for d, _ in conflicts}
+            await state.set_state(AdminScheduleModeStates.choosing_mode)
+            await state.update_data(
+                pending_mode=action,
+                mode_conflict_keep=list(keep_set),
+                mode_conflict_list=[(d, i) for d, i in conflicts],
+            )
+            await callback.message.edit_text(
+                text=_conflict_warning_text(conflicts),
+                reply_markup=get_custom_conflict_keyboard(
+                    conflicts, keep_set,
+                    "mode_conflict_toggle", "mode_conflict_apply", "admin:schedule"
+                ),
+                parse_mode="HTML",
+            )
+            return
+
+    await _apply_mode_switch(callback.message, state, action, current_mode)
+
+
+@router.callback_query(AdminScheduleModeStates.choosing_mode, F.data.startswith("mode_conflict_toggle:"))
+async def handle_mode_conflict_toggle(callback: CallbackQuery, state: FSMContext):
+    """Тогл кастомного дня при смене режима."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+    fsm = await state.get_data()
+    keep_set = set(fsm.get("mode_conflict_keep", []))
+    if date_str in keep_set:
+        keep_set.discard(date_str)
+    else:
+        keep_set.add(date_str)
+    await state.update_data(mode_conflict_keep=list(keep_set))
+
+    conflicts = fsm.get("mode_conflict_list", [])
+    await callback.message.edit_reply_markup(
+        reply_markup=get_custom_conflict_keyboard(
+            conflicts, keep_set,
+            "mode_conflict_toggle", "mode_conflict_apply", "admin:schedule"
+        )
+    )
+
+
+@router.callback_query(AdminScheduleModeStates.choosing_mode, F.data == "mode_conflict_apply")
+async def handle_mode_conflict_apply(callback: CallbackQuery, state: FSMContext):
+    """Применить смену режима с учётом выбора кастомных дней."""
+    await callback.answer()
+    fsm = await state.get_data()
+    action = fsm.get("pending_mode", "standard")
+    keep_set = set(fsm.get("mode_conflict_keep", []))
+
+    # "Override" дни: удалить custom_day флаг и свободные слоты
+    override_dates = [d for d, _ in fsm.get("mode_conflict_list", []) if d not in keep_set]
+    for d_str in override_dates:
+        slots = await db.get_all_slots_for_date(d_str)
+        for s in slots:
+            if s["is_available"]:
+                await db.delete_slot_by_id(s["id"])
+        try:
+            db.supabase.table("custom_days").delete().eq("date", d_str).execute()
+        except Exception as e:
+            logger.error(f"Ошибка удаления custom_day {d_str}: {e}")
+
+    current_mode = await db.get_setting("schedule_mode")
+    await _apply_mode_switch(callback.message, state, action, current_mode)
+
+
+async def _apply_mode_switch(message, state: FSMContext, action: str, current_mode: Optional[str]):
+    """Применяет смену режима расписания без проверки конфликтов."""
     if action == "standard":
         await db.set_setting("schedule_mode", "standard")
         if current_mode != "standard":
-            await callback.message.edit_text("⏳ Очищаю слоты и пересчитываю...", parse_mode="HTML")
+            await message.edit_text("⏳ Очищаю слоты и пересчитываю...", parse_mode="HTML")
             await db.clear_non_custom_future_slots()
         rule = await db.get_default_schedule()
         if not rule:
-            # Нет стандарта — запускаем мастер настройки
             await state.set_state(AdminDefaultScheduleStates.waiting_weekdays)
             await state.update_data(default_weekdays=set())
-            await callback.message.edit_text(
+            await message.edit_text(
                 "⚙️ <b>Стандартное расписание</b>\n\n"
                 "Шаг 1 из 4 — Выберите <b>рабочие дни</b>:",
                 reply_markup=get_weekday_keyboard(set(), cancel_cb="admin:schedule"),
                 parse_mode="HTML",
             )
             return
-        # Есть правило — регенерируем слоты
         await db.reset_default_schedule_slots()
         year, month = get_current_month_year()
-        await _show_schedule_view_calendar(callback.message, year, month, mode="standard")
+        await state.clear()
+        await _show_schedule_view_calendar(message, year, month, mode="standard")
 
     elif action == "monthly":
         await db.set_setting("schedule_mode", "monthly")
         if current_mode != "monthly":
-            await callback.message.edit_text("⏳ Очищаю слоты...", parse_mode="HTML")
+            await message.edit_text("⏳ Очищаю слоты...", parse_mode="HTML")
             await db.clear_non_custom_future_slots()
         year, month = get_current_month_year()
-        await _show_schedule_view_calendar(callback.message, year, month, mode="monthly")
+        await state.clear()
+        await _show_schedule_view_calendar(message, year, month, mode="monthly")
 
 
 @router.callback_query(F.data.startswith("admin_sched_vnav:"))
@@ -2610,6 +2689,35 @@ async def handle_weekday_toggle(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=get_weekday_keyboard(selected))
 
 
+@router.callback_query(
+    StateFilter(AdminScheduleRuleStates.waiting_weekdays, AdminDefaultScheduleStates.waiting_weekdays),
+    F.data.startswith("rule_wd_preset:"),
+)
+async def handle_weekday_preset(callback: CallbackQuery, state: FSMContext):
+    """Быстрый выбор: вся неделя или будни."""
+    await callback.answer()
+    preset = callback.data.split(":", 1)[1]
+    if preset == "all":
+        selected = set(range(7))
+    elif preset == "weekdays":
+        selected = set(range(5))  # 0=Пн, 4=Пт
+    else:
+        selected = set()
+
+    # Определяем флоу по текущему состоянию
+    current_state = await state.get_state()
+    if current_state and "AdminDefaultScheduleStates" in current_state:
+        await state.update_data(default_weekdays=list(selected))
+        cancel_cb = "admin:default_schedule"
+    else:
+        await state.update_data(rule_weekdays=list(selected))
+        cancel_cb = "admin:schedule_rule"
+
+    await callback.message.edit_reply_markup(
+        reply_markup=get_weekday_keyboard(selected, cancel_cb=cancel_cb)
+    )
+
+
 @router.callback_query(AdminScheduleRuleStates.waiting_weekdays, F.data == "rule_wd_done")
 async def handle_weekday_done(callback: CallbackQuery, state: FSMContext):
     """Подтверждение дней, шаг 2 — выбор времени начала."""
@@ -2656,48 +2764,131 @@ async def handle_rule_start_time(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(AdminScheduleRuleStates.waiting_end_time, F.data.startswith("rule_end:"))
 async def handle_rule_end_time(callback: CallbackQuery, state: FSMContext):
-    """Записать время окончания, шаг 4 — выбор интервала."""
+    """Записать время окончания, шаг 4 — тогл интервала."""
     await callback.answer()
     hour = int(callback.data.split(":")[1])
-    await state.update_data(rule_end_hour=hour)
+    await state.update_data(rule_end_hour=hour, rule_interval=60)  # 60 мин по умолчанию
     await state.set_state(AdminScheduleRuleStates.waiting_interval)
 
     fsm = await state.get_data()
     start_hour = fsm["rule_start_hour"]
 
-    builder = InlineKeyboardBuilder()
-    builder.button(text="⏱ 15 минут", callback_data="rule_interval:15")
-    builder.button(text="⏱ 30 минут", callback_data="rule_interval:30")
-    builder.button(text="⏱ 1 час", callback_data="rule_interval:60")
-    builder.adjust(3)
-    builder.row(InlineKeyboardButton(text="← Назад", callback_data="admin:schedule_rule"))
+    msg = await callback.message.edit_text(
+        text=_rule_interval_text("monthly", start_hour, hour),
+        reply_markup=get_interval_select_keyboard(
+            60, "rule_interval_apply", "admin:schedule_rule", "rule_interval_custom"
+        ),
+        parse_mode="HTML",
+    )
+    await state.update_data(interval_msg_id=msg.message_id)
 
+
+@router.callback_query(AdminScheduleRuleStates.waiting_interval, F.data.startswith("interval_sel:"))
+async def handle_rule_interval_select(callback: CallbackQuery, state: FSMContext):
+    """Переключить выбранный интервал (тогл) — без создания слотов."""
+    await callback.answer()
+    interval_min = int(callback.data.split(":")[1])
+    await state.update_data(rule_interval=interval_min, interval_msg_id=callback.message.message_id)
+
+    fsm = await state.get_data()
+    await callback.message.edit_reply_markup(
+        reply_markup=get_interval_select_keyboard(
+            interval_min, "rule_interval_apply", "admin:schedule_rule", "rule_interval_custom"
+        )
+    )
+
+
+@router.callback_query(AdminScheduleRuleStates.waiting_interval, F.data == "rule_interval_custom")
+async def handle_rule_interval_custom(callback: CallbackQuery, state: FSMContext):
+    """Переход к вводу своего значения интервала."""
+    await callback.answer()
+    await state.update_data(interval_msg_id=callback.message.message_id)
+    await state.set_state(AdminScheduleRuleStates.waiting_custom_interval)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="rule_custom_interval_cancel")
     await callback.message.edit_text(
         text=(
             "📅 <b>Создать расписание на месяц</b>\n\n"
-            f"Начало: <b>{start_hour:02d}:00</b> — Конец: <b>{hour:02d}:00</b>\n\n"
-            "Шаг 4 из 4 — Выберите <b>интервал</b> между записями:"
+            "Введите интервал между записями в <b>минутах</b>\n"
+            "<i>(от 5 до 480, например: 45)</i>"
         ),
         reply_markup=builder.as_markup(),
         parse_mode="HTML",
     )
 
 
-@router.callback_query(AdminScheduleRuleStates.waiting_interval, F.data.startswith("rule_interval:"))
-async def handle_rule_interval(callback: CallbackQuery, state: FSMContext):
-    """Запускает генерацию слотов и показывает результат."""
+@router.callback_query(AdminScheduleRuleStates.waiting_custom_interval, F.data == "rule_custom_interval_cancel")
+async def handle_rule_custom_interval_cancel(callback: CallbackQuery, state: FSMContext):
+    """Отмена ввода — вернуться к тоглу интервала."""
     await callback.answer()
-    interval_min = int(callback.data.split(":")[1])
     fsm = await state.get_data()
-    await state.clear()
+    await state.set_state(AdminScheduleRuleStates.waiting_interval)
+    current = fsm.get("rule_interval", 60)
+    start_hour = fsm.get("rule_start_hour", 9)
+    end_hour = fsm.get("rule_end_hour", 18)
+
+    msg = await callback.message.edit_text(
+        text=_rule_interval_text("monthly", start_hour, end_hour),
+        reply_markup=get_interval_select_keyboard(
+            current, "rule_interval_apply", "admin:schedule_rule", "rule_interval_custom"
+        ),
+        parse_mode="HTML",
+    )
+    await state.update_data(interval_msg_id=msg.message_id)
+
+
+@router.message(AdminScheduleRuleStates.waiting_custom_interval, F.text)
+async def handle_rule_custom_interval_msg(message: Message, state: FSMContext, bot: Bot):
+    """Обрабатывает ввод своего значения интервала."""
+    text = message.text.strip()
+    try:
+        value = int(text)
+        if not 5 <= value <= 480:
+            raise ValueError
+    except ValueError:
+        await message.reply("❌ Введите целое число от 5 до 480 минут.")
+        return
+
+    fsm = await state.get_data()
+    msg_id = fsm.get("interval_msg_id")
+    start_hour = fsm.get("rule_start_hour", 9)
+    end_hour = fsm.get("rule_end_hour", 18)
+
+    await state.update_data(rule_interval=value)
+    await state.set_state(AdminScheduleRuleStates.waiting_interval)
+
+    try:
+        await bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=msg_id,
+            text=_rule_interval_text("monthly", start_hour, end_hour),
+            reply_markup=get_interval_select_keyboard(
+                value, "rule_interval_apply", "admin:schedule_rule", "rule_interval_custom"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+@router.callback_query(AdminScheduleRuleStates.waiting_interval, F.data == "rule_interval_apply")
+async def handle_rule_interval_apply(callback: CallbackQuery, state: FSMContext):
+    """Применить: проверить кастомные дни, затем создать слоты."""
+    await callback.answer()
+    fsm = await state.get_data()
+    interval_min = fsm.get("rule_interval", 60)
+    weekdays = set(fsm.get("rule_weekdays", []))
+    start_hour = fsm["rule_start_hour"]
+    end_hour = fsm["rule_end_hour"]
 
     today = date.today()
     year, month = today.year, today.month
     last_day = cal_module.monthrange(year, month)[1]
-
-    weekdays = set(fsm.get("rule_weekdays", []))
-    start_hour = fsm["rule_start_hour"]
-    end_hour = fsm["rule_end_hour"]
 
     dates = [
         date(year, month, d).strftime("%Y-%m-%d")
@@ -2706,6 +2897,7 @@ async def handle_rule_interval(callback: CallbackQuery, state: FSMContext):
     ]
 
     if not dates:
+        await state.clear()
         builder = InlineKeyboardBuilder()
         builder.button(text="← Расписание", callback_data="admin:schedule")
         await callback.message.edit_text(
@@ -2715,13 +2907,106 @@ async def handle_rule_interval(callback: CallbackQuery, state: FSMContext):
         )
         return
 
+    # Проверяем наличие кастомных дней среди целевых дат
+    conflicts = await _get_schedule_conflicts(dates)
+    if conflicts:
+        keep_set = {d for d, _ in conflicts}  # по умолчанию все сохраняем
+        await state.update_data(
+            rule_dates=dates,
+            rule_conflict_keep=list(keep_set),
+            rule_conflict_list=[(d, i) for d, i in conflicts],
+        )
+        await state.set_state(AdminScheduleRuleStates.confirm_custom)
+        await callback.message.edit_text(
+            text=_conflict_warning_text(conflicts),
+            reply_markup=get_custom_conflict_keyboard(
+                conflicts, keep_set,
+                "rule_conflict_toggle", "rule_conflict_apply", "admin:schedule"
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    # Нет конфликтов — создаём сразу
+    await state.clear()
+    await _do_monthly_create(callback.message, dates, start_hour, end_hour, interval_min, year, month, weekdays)
+
+
+@router.callback_query(AdminScheduleRuleStates.confirm_custom, F.data.startswith("rule_conflict_toggle:"))
+async def handle_rule_conflict_toggle(callback: CallbackQuery, state: FSMContext):
+    """Тогл кастомного дня: сохранить или применить общие правила."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+    fsm = await state.get_data()
+    keep_set = set(fsm.get("rule_conflict_keep", []))
+    if date_str in keep_set:
+        keep_set.discard(date_str)
+    else:
+        keep_set.add(date_str)
+    await state.update_data(rule_conflict_keep=list(keep_set))
+
+    conflicts = fsm.get("rule_conflict_list", [])
+    await callback.message.edit_reply_markup(
+        reply_markup=get_custom_conflict_keyboard(
+            conflicts, keep_set,
+            "rule_conflict_toggle", "rule_conflict_apply", "admin:schedule"
+        )
+    )
+
+
+@router.callback_query(AdminScheduleRuleStates.confirm_custom, F.data == "rule_conflict_apply")
+async def handle_rule_conflict_apply(callback: CallbackQuery, state: FSMContext):
+    """Применить с учётом выбора по кастомным дням."""
+    await callback.answer()
+    fsm = await state.get_data()
+    interval_min = fsm.get("rule_interval", 60)
+    start_hour = fsm["rule_start_hour"]
+    end_hour = fsm["rule_end_hour"]
+    weekdays = set(fsm.get("rule_weekdays", []))
+    dates = fsm.get("rule_dates", [])
+    keep_set = set(fsm.get("rule_conflict_keep", []))
+    today = date.today()
+    year, month = today.year, today.month
+    await state.clear()
+
+    # Для "override" дней: сбросить кастом и удалить слоты
+    override_dates = [d for d in dates if d not in keep_set]
+    for d_str in override_dates:
+        # Удалить свободные слоты, убрать custom_day флаг
+        slots = await db.get_all_slots_for_date(d_str)
+        for s in slots:
+            if s["is_available"]:
+                await db.delete_slot_by_id(s["id"])
+        try:
+            db.supabase.table("custom_days").delete().eq("date", d_str).execute()
+        except Exception as e:
+            logger.error(f"Ошибка удаления custom_day {d_str}: {e}")
+
+    # Создаём слоты только на не-keep датах
+    create_dates = [d for d in dates if d not in keep_set]
+    if create_dates:
+        await _do_monthly_create(
+            callback.message, create_dates, start_hour, end_hour, interval_min, year, month, weekdays,
+            kept_count=len(keep_set)
+        )
+    else:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="📋 Посмотреть расписание", callback_data="admin:schedule")
+        builder.adjust(1)
+        await callback.message.edit_text(
+            "✅ Все дни сохранены с индивидуальными настройками. Новые слоты не созданы.",
+            reply_markup=builder.as_markup(),
+        )
+
+
+async def _do_monthly_create(message, dates, start_hour, end_hour, interval_min, year, month, weekdays, kept_count=0):
+    """Создаёт слоты по месячному правилу и показывает результат."""
     result = await db.bulk_create_slots(
         dates,
         f"{start_hour:02d}:00",
-        f"{end_hour:02d}:00",
+        f"{end_hour:02d}:00" if end_hour != 0 else "00:00",
         interval_min,
     )
-    # Месячный генератор не помечает даты как custom — при смене стандарта они перезапишутся
     created = result["created"]
     skipped = result["skipped"]
 
@@ -2737,19 +3022,60 @@ async def handle_rule_interval(callback: CallbackQuery, state: FSMContext):
     builder.adjust(1)
 
     skip_text = f"\nПропущено <b>{skipped}</b> (уже существовали)" if skipped else ""
-    await callback.message.edit_text(
+    kept_text = f"\nСохранено инд. дней: <b>{kept_count}</b>" if kept_count else ""
+    end_fmt = _fmt_end_hour(end_hour)
+    await message.edit_text(
         text=(
             f"✅ <b>Расписание создано!</b>\n\n"
-            f"Создано <b>{created}</b> слотов на <b>{len(dates)}</b> рабочих дней.{skip_text}\n\n"
-            f"<i>Интервал {interval_min} мин · {start_hour:02d}:00 — {end_hour:02d}:00</i>"
+            f"Создано <b>{created}</b> слотов на <b>{len(dates)}</b> рабочих дней.{skip_text}{kept_text}\n\n"
+            f"<i>Интервал {interval_min} мин · {start_hour:02d}:00 — {end_fmt}</i>"
         ),
         reply_markup=builder.as_markup(),
         parse_mode="HTML",
     )
 
 
+def _rule_interval_text(flow: str, start_hour: int, end_hour: int) -> str:
+    """Текст шага 4 (выбор интервала) для указанного флоу."""
+    title = "📅 <b>Создать расписание на месяц</b>" if flow == "monthly" else "⚙️ <b>Стандартное расписание</b>"
+    end_fmt = _fmt_end_hour(end_hour)
+    return (
+        f"{title}\n\n"
+        f"Начало: <b>{start_hour:02d}:00</b> — Конец: <b>{end_fmt}</b>\n\n"
+        "Шаг 4 из 4 — Выберите <b>интервал</b> между записями:"
+    )
+
+
+async def _get_schedule_conflicts(dates: list) -> list:
+    """
+    Возвращает список (date_str, info) для дат, которые являются кастомными днями.
+    """
+    custom = await db.get_custom_days()
+    conflicts = []
+    for d in dates:
+        if d in custom:
+            info = await db.get_day_schedule_info(d)
+            conflicts.append((d, info))
+    return conflicts
+
+
+def _conflict_warning_text(conflicts: list) -> str:
+    """Текст предупреждения о кастомных днях."""
+    lines = [
+        "⚠️ <b>Обнаружены дни с индивидуальным расписанием</b>\n\n"
+        "✅ = сохранить индивидуальное · ⬜ = применить общие правила\n"
+    ]
+    for date_str, info in conflicts:
+        if info:
+            schedule = f"{info['start']}–{info['end_exclusive']}, {info['interval_min']} мин"
+        else:
+            schedule = "выходной"
+        lines.append(f"• {date_str} ({schedule})")
+    return "\n".join(lines)
+
+
 @router.callback_query(F.data.startswith("rule_next:"))
-async def handle_rule_next_month(callback: CallbackQuery, state: FSMContext):
+async def handle_rule_next_month(callback: CallbackQuery):
     """Создаёт расписание по тому же правилу на следующий месяц."""
     await callback.answer()
     parts = callback.data.split(":")
@@ -2772,10 +3098,9 @@ async def handle_rule_next_month(callback: CallbackQuery, state: FSMContext):
     result = await db.bulk_create_slots(
         dates,
         f"{start_hour:02d}:00",
-        f"{end_hour:02d}:00",
+        f"{end_hour:02d}:00" if end_hour != 0 else "00:00",
         interval_min,
     )
-    # Месячный генератор не помечает даты как custom — при смене стандарта они перезапишутся
     created = result["created"]
     skipped = result["skipped"]
 
@@ -2784,12 +3109,13 @@ async def handle_rule_next_month(callback: CallbackQuery, state: FSMContext):
     builder.button(text="◀ Главное меню", callback_data="admin:main")
     builder.adjust(1)
 
+    end_fmt = _fmt_end_hour(end_hour)
     skip_text = f"\nПропущено <b>{skipped}</b> (уже существовали)" if skipped else ""
     await callback.message.edit_text(
         text=(
             f"✅ <b>Расписание на {MONTHS_RU[next_month]} создано!</b>\n\n"
             f"Создано <b>{created}</b> слотов на <b>{len(dates)}</b> рабочих дней.{skip_text}\n\n"
-            f"<i>Интервал {interval_min} мин · {start_hour:02d}:00 — {end_hour:02d}:00</i>"
+            f"<i>Интервал {interval_min} мин · {start_hour:02d}:00 — {end_fmt}</i>"
         ),
         reply_markup=builder.as_markup(),
         parse_mode="HTML",
@@ -3161,17 +3487,25 @@ async def handle_ed_extend_evening(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     date_str = callback.data.split(":", 1)[1]
     info = await db.get_day_schedule_info(date_str)
-    current_end_h = int(info["end"][:2]) if info else 18
+    # Используем end_exclusive (время закрытия), а не end (время последнего слота)
+    if info:
+        closing = info["end_exclusive"]  # e.g. "22:00" or "24:00"
+        if closing == "24:00":
+            current_end_h = 0  # уже заканчивается в полночь
+        else:
+            current_end_h = int(closing[:2])
+    else:
+        current_end_h = 18
 
-    hours = list(range(current_end_h + 1, 24))
+    hours = list(range(current_end_h + 1, 24)) if current_end_h > 0 else []
     if not hours:
-        await callback.answer("День уже заканчивается в 23:00, некуда продлевать.", show_alert=True)
+        await callback.answer("День уже заканчивается в 24:00, некуда продлевать.", show_alert=True)
         return
 
     await state.set_state(AdminScheduleEditStates.extending_evening)
     await state.update_data(edit_date=date_str, edit_dates=[date_str])
 
-    end_txt = info["end"] if info else "?:??"
+    end_txt = info["end_exclusive"] if info else "?:??"
     await callback.message.edit_text(
         text=(
             f"➕ <b>Продлить вечером · {format_date_ru(date_str)}</b>\n\n"
@@ -3835,62 +4169,218 @@ async def handle_default_start_time(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(AdminDefaultScheduleStates.waiting_end_time, F.data.startswith("default_end:"))
 async def handle_default_end_time(callback: CallbackQuery, state: FSMContext):
-    """Записывает конец, шаг 4 — интервал."""
+    """Записывает конец, шаг 4 — тогл интервала."""
     await callback.answer()
     hour = int(callback.data.split(":")[1])
-    await state.update_data(default_end_hour=hour)
+    await state.update_data(default_end_hour=hour, default_interval=60)
     await state.set_state(AdminDefaultScheduleStates.waiting_interval)
 
     fsm = await state.get_data()
     start_hour = fsm["default_start_hour"]
 
-    builder = InlineKeyboardBuilder()
-    builder.button(text="⏱ 15 минут", callback_data="default_interval:15")
-    builder.button(text="⏱ 30 минут", callback_data="default_interval:30")
-    builder.button(text="⏱ 1 час", callback_data="default_interval:60")
-    builder.adjust(3)
-    builder.row(InlineKeyboardButton(text="← Назад", callback_data="admin:default_schedule"))
+    msg = await callback.message.edit_text(
+        text=_rule_interval_text("standard", start_hour, hour),
+        reply_markup=get_interval_select_keyboard(
+            60, "default_interval_apply", "admin:default_schedule", "default_interval_custom"
+        ),
+        parse_mode="HTML",
+    )
+    await state.update_data(interval_msg_id=msg.message_id)
 
+
+@router.callback_query(AdminDefaultScheduleStates.waiting_interval, F.data.startswith("interval_sel:"))
+async def handle_default_interval_select(callback: CallbackQuery, state: FSMContext):
+    """Переключить выбранный интервал для стандартного расписания."""
+    await callback.answer()
+    interval_min = int(callback.data.split(":")[1])
+    await state.update_data(default_interval=interval_min, interval_msg_id=callback.message.message_id)
+    await callback.message.edit_reply_markup(
+        reply_markup=get_interval_select_keyboard(
+            interval_min, "default_interval_apply", "admin:default_schedule", "default_interval_custom"
+        )
+    )
+
+
+@router.callback_query(AdminDefaultScheduleStates.waiting_interval, F.data == "default_interval_custom")
+async def handle_default_interval_custom(callback: CallbackQuery, state: FSMContext):
+    """Переход к вводу своего значения интервала (стандартное расписание)."""
+    await callback.answer()
+    await state.update_data(interval_msg_id=callback.message.message_id)
+    await state.set_state(AdminDefaultScheduleStates.waiting_custom_interval)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="default_custom_interval_cancel")
     await callback.message.edit_text(
         text=(
             "⚙️ <b>Стандартное расписание</b>\n\n"
-            f"Начало: <b>{start_hour:02d}:00</b> — Конец: <b>{hour:02d}:00</b>\n\n"
-            "Шаг 4 из 4 — Выберите <b>интервал</b> между записями:"
+            "Введите интервал между записями в <b>минутах</b>\n"
+            "<i>(от 5 до 480, например: 45)</i>"
         ),
         reply_markup=builder.as_markup(),
         parse_mode="HTML",
     )
 
 
-@router.callback_query(AdminDefaultScheduleStates.waiting_interval, F.data.startswith("default_interval:"))
-async def handle_default_interval(callback: CallbackQuery, state: FSMContext):
-    """Сохраняет стандартное расписание и пересоздаёт слоты на 24 мес вперёд."""
+@router.callback_query(AdminDefaultScheduleStates.waiting_custom_interval, F.data == "default_custom_interval_cancel")
+async def handle_default_custom_interval_cancel(callback: CallbackQuery, state: FSMContext):
+    """Отмена ввода — вернуться к тоглу интервала (стандартное расписание)."""
     await callback.answer()
-    interval_min = int(callback.data.split(":")[1])
     fsm = await state.get_data()
+    await state.set_state(AdminDefaultScheduleStates.waiting_interval)
+    current = fsm.get("default_interval", 60)
+    start_hour = fsm.get("default_start_hour", 9)
+    end_hour = fsm.get("default_end_hour", 18)
 
-    weekdays_mask = sum(1 << w for w in fsm.get("default_weekdays", []))
+    msg = await callback.message.edit_text(
+        text=_rule_interval_text("standard", start_hour, end_hour),
+        reply_markup=get_interval_select_keyboard(
+            current, "default_interval_apply", "admin:default_schedule", "default_interval_custom"
+        ),
+        parse_mode="HTML",
+    )
+    await state.update_data(interval_msg_id=msg.message_id)
+
+
+@router.message(AdminDefaultScheduleStates.waiting_custom_interval, F.text)
+async def handle_default_custom_interval_msg(message: Message, state: FSMContext, bot: Bot):
+    """Обрабатывает ввод своего значения интервала (стандартное расписание)."""
+    text = message.text.strip()
+    try:
+        value = int(text)
+        if not 5 <= value <= 480:
+            raise ValueError
+    except ValueError:
+        await message.reply("❌ Введите целое число от 5 до 480 минут.")
+        return
+
+    fsm = await state.get_data()
+    msg_id = fsm.get("interval_msg_id")
+    start_hour = fsm.get("default_start_hour", 9)
+    end_hour = fsm.get("default_end_hour", 18)
+
+    await state.update_data(default_interval=value)
+    await state.set_state(AdminDefaultScheduleStates.waiting_interval)
+
+    try:
+        await bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=msg_id,
+            text=_rule_interval_text("standard", start_hour, end_hour),
+            reply_markup=get_interval_select_keyboard(
+                value, "default_interval_apply", "admin:default_schedule", "default_interval_custom"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+@router.callback_query(AdminDefaultScheduleStates.waiting_interval, F.data == "default_interval_apply")
+async def handle_default_interval_apply(callback: CallbackQuery, state: FSMContext):
+    """Применить интервал: проверить кастомные дни, сохранить стандарт."""
+    await callback.answer()
+    fsm = await state.get_data()
+    interval_min = fsm.get("default_interval", 60)
+    weekdays_list = fsm.get("default_weekdays", [])
+    weekdays_mask = sum(1 << w for w in weekdays_list)
     start_hour = fsm["default_start_hour"]
     end_hour = fsm["default_end_hour"]
 
-    # Пробуем сохранить — если таблица не создана, покажем ошибку
+    # Проверяем кастомные дни
+    custom_days = await db.get_custom_days()
+    if custom_days:
+        conflicts = []
+        for d_str in sorted(custom_days):
+            info = await db.get_day_schedule_info(d_str)
+            conflicts.append((d_str, info))
+
+        keep_set = {d for d, _ in conflicts}  # по умолчанию все сохраняем
+        await state.update_data(
+            std_conflict_keep=list(keep_set),
+            std_conflict_list=[(d, i) for d, i in conflicts],
+        )
+        await state.set_state(AdminDefaultScheduleStates.confirm_custom)
+        await callback.message.edit_text(
+            text=_conflict_warning_text(conflicts),
+            reply_markup=get_custom_conflict_keyboard(
+                conflicts, keep_set,
+                "default_conflict_toggle", "default_conflict_apply", "admin:default_schedule"
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    # Нет кастомных дней — сохраняем сразу
+    await _do_default_save(callback.message, state, weekdays_mask, start_hour, end_hour, interval_min)
+
+
+@router.callback_query(AdminDefaultScheduleStates.confirm_custom, F.data.startswith("default_conflict_toggle:"))
+async def handle_default_conflict_toggle(callback: CallbackQuery, state: FSMContext):
+    """Тогл кастомного дня для стандартного расписания."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+    fsm = await state.get_data()
+    keep_set = set(fsm.get("std_conflict_keep", []))
+    if date_str in keep_set:
+        keep_set.discard(date_str)
+    else:
+        keep_set.add(date_str)
+    await state.update_data(std_conflict_keep=list(keep_set))
+
+    conflicts = fsm.get("std_conflict_list", [])
+    await callback.message.edit_reply_markup(
+        reply_markup=get_custom_conflict_keyboard(
+            conflicts, keep_set,
+            "default_conflict_toggle", "default_conflict_apply", "admin:default_schedule"
+        )
+    )
+
+
+@router.callback_query(AdminDefaultScheduleStates.confirm_custom, F.data == "default_conflict_apply")
+async def handle_default_conflict_apply(callback: CallbackQuery, state: FSMContext):
+    """Применить стандартное расписание с учётом выбора кастомных дней."""
+    await callback.answer()
+    fsm = await state.get_data()
+    interval_min = fsm.get("default_interval", 60)
+    weekdays_mask = sum(1 << w for w in fsm.get("default_weekdays", []))
+    start_hour = fsm["default_start_hour"]
+    end_hour = fsm["default_end_hour"]
+    keep_set = set(fsm.get("std_conflict_keep", []))
+
+    # Для "override" дней: убрать custom_day флаг и удалить свободные слоты
+    override_dates = [d for d, _ in fsm.get("std_conflict_list", []) if d not in keep_set]
+    for d_str in override_dates:
+        slots = await db.get_all_slots_for_date(d_str)
+        for s in slots:
+            if s["is_available"]:
+                await db.delete_slot_by_id(s["id"])
+        try:
+            db.supabase.table("custom_days").delete().eq("date", d_str).execute()
+        except Exception as e:
+            logger.error(f"Ошибка удаления custom_day {d_str}: {e}")
+
+    await _do_default_save(callback.message, state, weekdays_mask, start_hour, end_hour, interval_min)
+
+
+async def _do_default_save(message, state: FSMContext, weekdays_mask: int, start_hour: int, end_hour: int, interval_min: int):
+    """Сохраняет стандартное расписание и генерирует слоты."""
     saved = await db.save_default_schedule(weekdays_mask, start_hour, end_hour, interval_min)
     if saved is not True:
         back_builder = InlineKeyboardBuilder()
         back_builder.button(text="◀ Назад", callback_data="admin:default_schedule")
         error_detail = f"\n\n<code>{saved}</code>" if isinstance(saved, str) else ""
-        await callback.message.edit_text(
+        await message.edit_text(
             text=f"❌ <b>Ошибка сохранения</b>{error_detail}",
             reply_markup=back_builder.as_markup(),
             parse_mode="HTML",
         )
         return
 
-    # Сообщаем что идёт генерация
-    await callback.message.edit_text(
-        "⏳ Сохраняю расписание и генерирую слоты на 24 месяца вперёд...",
-        parse_mode="HTML",
-    )
+    await message.edit_text("⏳ Сохраняю расписание и генерирую слоты на 24 месяца вперёд...", parse_mode="HTML")
 
     result = await db.reset_default_schedule_slots()
     await state.clear()
@@ -3904,7 +4394,7 @@ async def handle_default_interval(callback: CallbackQuery, state: FSMContext):
     builder.button(text="◀ Главное меню", callback_data="admin:main")
     builder.adjust(1)
 
-    await callback.message.edit_text(
+    await message.edit_text(
         text=(
             "✅ <b>Стандартное расписание сохранено</b>\n\n"
             f"📅 Дни: <b>{wd_str}</b>\n"

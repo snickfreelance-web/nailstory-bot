@@ -741,6 +741,7 @@ def get_weekday_keyboard(
     """
     Клавиатура выбора дней недели (мультивыбор).
     ✅ — выбран, ⬜ — не выбран.
+    Быстрый выбор: «Вся неделя» / «Будни».
 
     Args:
         selected: Множество индексов выбранных дней (0=Пн, 6=Вс)
@@ -752,8 +753,84 @@ def get_weekday_keyboard(
         builder.button(text=f"{mark} {name}", callback_data=f"rule_wd:{i}")
     builder.adjust(4, 3)
     builder.row(
+        InlineKeyboardButton(text="📅 Вся неделя", callback_data="rule_wd_preset:all"),
+        InlineKeyboardButton(text="💼 Будни (Пн-Пт)", callback_data="rule_wd_preset:weekdays"),
+    )
+    builder.row(
         InlineKeyboardButton(text="✅ Готово →", callback_data="rule_wd_done"),
         InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_cb),
+    )
+    return builder.as_markup()
+
+
+def get_interval_select_keyboard(
+    current_interval: int,
+    apply_cb: str,
+    back_cb: str,
+    custom_cb: str,
+) -> InlineKeyboardMarkup:
+    """
+    Тогл-клавиатура выбора интервала.
+    🔘 — выбран, ⭕ — не выбран.
+    Содержит кнопку «Своё значение» и «Применить».
+
+    Args:
+        current_interval: текущий выбранный интервал в минутах
+        apply_cb: callback_data для кнопки «Применить»
+        back_cb: callback_data для кнопки «← Назад»
+        custom_cb: callback_data для кнопки «Своё значение»
+    """
+    builder = InlineKeyboardBuilder()
+    for mins in [15, 30, 60]:
+        mark = "🔘" if current_interval == mins else "⭕"
+        builder.button(text=f"{mark} {mins} мин", callback_data=f"interval_sel:{mins}")
+    builder.adjust(3)
+    if current_interval not in [15, 30, 60]:
+        custom_label = f"🔘 Своё: {current_interval} мин"
+    else:
+        custom_label = "⭕ Своё значение"
+    builder.button(text=custom_label, callback_data=custom_cb)
+    builder.adjust(3, 1)
+    builder.row(
+        InlineKeyboardButton(text="✅ Применить", callback_data=apply_cb),
+        InlineKeyboardButton(text="← Назад", callback_data=back_cb),
+    )
+    return builder.as_markup()
+
+
+def get_custom_conflict_keyboard(
+    conflicts: list,
+    keep_set: set,
+    toggle_prefix: str,
+    apply_cb: str,
+    back_cb: str,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура подтверждения для дней с индивидуальным расписанием.
+    ✅ = сохранить индивидуальное расписание, ⬜ = применить общие правила.
+
+    Args:
+        conflicts: список (date_str, info_dict) конфликтующих дней
+        keep_set: множество date_str, которые нужно сохранить
+        toggle_prefix: префикс callback для тогла (e.g. "rule_conflict_toggle")
+        apply_cb: callback для «Применить»
+        back_cb: callback для «← Отмена»
+    """
+    builder = InlineKeyboardBuilder()
+    for date_str, info in conflicts:
+        mark = "✅" if date_str in keep_set else "⬜"
+        if info:
+            schedule_label = f"{info['start']}–{info['end_exclusive']}"
+        else:
+            schedule_label = "выходной"
+        builder.button(
+            text=f"{mark} {date_str[5:]} ({schedule_label})",
+            callback_data=f"{toggle_prefix}:{date_str}",
+        )
+    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="✅ Применить", callback_data=apply_cb),
+        InlineKeyboardButton(text="❌ Отмена", callback_data=back_cb),
     )
     return builder.as_markup()
 
