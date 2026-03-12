@@ -1367,18 +1367,128 @@ async def handle_admin_reschedule_confirm(callback: CallbackQuery, state: FSMCon
 # 7. УПРАВЛЕНИЕ РАСПИСАНИЕМ (СЛОТЫ)
 # ===================================================
 
+async def _show_schedule_view_calendar(message, year: int, month: int, edit: bool = True):
+    """
+    Главная страница расписания: календарь + кнопки управления ниже.
+    Все будущие дни кликабельны.
+    """
+    dates_with_slots = await db.get_dates_with_any_slots(year, month)
+    kb = build_admin_calendar(
+        year, month, dates_with_slots,
+        nav_prefix="admin_sched_view_nav",
+        date_prefix="admin_sched_view_date",
+    )
+    kb.inline_keyboard.extend([
+        [InlineKeyboardButton(text="⚙️ Стандартное расписание", callback_data="admin:default_schedule")],
+        [InlineKeyboardButton(text="📅 Создать расписание на месяц", callback_data="admin:schedule_rule")],
+        [InlineKeyboardButton(text="✏️ Редактировать расписание", callback_data="admin:schedule_edit")],
+        [InlineKeyboardButton(text="◀ Главное меню", callback_data="admin:main")],
+    ])
+
+    rule = await db.get_default_schedule()
+    hint = "<i>📅 — есть слоты · нажмите на день для просмотра</i>"
+    if rule:
+        wd_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        wd_list = " ".join(n for i, n in enumerate(wd_names) if rule["weekdays_mask"] & (1 << i))
+        hint += (
+            f"\n⚙️ <b>Стандарт:</b> {wd_list} · "
+            f"{rule['start_hour']:02d}:00–{rule['end_hour']:02d}:00 · "
+            f"{rule['interval_min']} мин"
+        )
+
+    text = f"📅 <b>Расписание</b>\n\n{hint}"
+    if edit:
+        await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
 @router.callback_query(F.data == "admin:schedule")
 async def handle_admin_schedule(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
+    year, month = get_current_month_year()
+    await _show_schedule_view_calendar(callback.message, year, month)
+
+
+@router.callback_query(F.data.startswith("admin_sched_view_nav:"))
+async def handle_admin_sched_view_nav(callback: CallbackQuery):
+    """Навигация по месяцам в главном виде расписания."""
+    await callback.answer()
+    _, year_str, month_str = callback.data.split(":")
+    await _show_schedule_view_calendar(callback.message, int(year_str), int(month_str))
+
+
+@router.callback_query(F.data.startswith("admin_sched_view_date:"))
+async def handle_admin_sched_view_date(callback: CallbackQuery, state: FSMContext):
+    """Клик на день в просмотре расписания — показывает режим работы."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+
+    slots = await db.get_all_slots_for_date(date_str)
+    info = await db.get_day_schedule_info(date_str)
+    year, month = int(date_str[:4]), int(date_str[5:7])
+
+    builder = InlineKeyboardBuilder()
+    if slots:
+        free = sum(1 for s in slots if s["is_available"])
+        booked = len(slots) - free
+        info_str = ""
+        if info:
+            info_str = (
+                f"\n🕐 <b>{info['start']} – {info['end']}</b>\n"
+                f"⏱ Интервал: {info['interval_min']} мин\n"
+            )
+        text = (
+            f"📅 <b>{format_date_ru(date_str)}</b>"
+            f"{info_str}\n"
+            f"Слотов: {len(slots)} (свободных: {free}, занято: {booked})"
+        )
+        builder.button(text="✏️ Редактировать день", callback_data=f"admin_sched_edit_day:{date_str}")
+    else:
+        text = f"📅 <b>{format_date_ru(date_str)}</b>\n\nРабочий день не создан."
+        builder.button(text="➕ Создать рабочий день", callback_data=f"admin_sched_create_day:{date_str}")
+
+    builder.button(text="← К расписанию", callback_data=f"admin_sched_view_nav:{year}:{month}")
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
+    builder.adjust(1)
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("admin_sched_edit_day:"))
+async def handle_admin_sched_edit_day(callback: CallbackQuery, state: FSMContext):
+    """Из просмотра дня → меню действий редактора для этого дня."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+    await state.set_state(AdminScheduleEditStates.waiting_date)
+    await _show_day_action_menu(callback.message, date_str, state)
+
+
+@router.callback_query(F.data.startswith("admin_sched_create_day:"))
+async def handle_admin_sched_create_day(callback: CallbackQuery, state: FSMContext):
+    """Из просмотра пустого дня → создать рабочий день."""
+    await callback.answer()
+    date_str = callback.data.split(":", 1)[1]
+    await state.set_state(AdminScheduleEditStates.day_waiting_start)
+    await state.update_data(edit_date=date_str)
+
+    rule = await db.get_default_schedule()
+    builder = InlineKeyboardBuilder()
+    if rule:
+        builder.button(
+            text=f"✅ По стандарту ({rule['start_hour']:02d}:00–{rule['end_hour']:02d}:00, {rule['interval_min']} мин)",
+            callback_data=f"ed_day_default:{date_str}",
+        )
+    builder.button(text="⚙️ Настроить вручную", callback_data="ed_day_manual")
+    year, month = int(date_str[:4]), int(date_str[5:7])
+    builder.button(text="← К расписанию", callback_data=f"admin_sched_view_nav:{year}:{month}")
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
+    builder.adjust(1)
 
     await callback.message.edit_text(
-        text=(
-            "📅 <b>Управление расписанием</b>\n\n"
-            "Здесь вы можете добавлять рабочие дни\n"
-            "и управлять временными слотами."
-        ),
-        reply_markup=get_admin_schedule_keyboard(),
+        text=f"📅 <b>{format_date_ru(date_str)}</b> — рабочий день не создан.\n\nКак создать слоты?",
+        reply_markup=builder.as_markup(),
         parse_mode="HTML",
     )
 
@@ -2326,6 +2436,8 @@ async def handle_rule_interval(callback: CallbackQuery, state: FSMContext):
         f"{end_hour:02d}:00",
         interval_min,
     )
+    # Месячный генератор имеет приоритет над стандартным расписанием
+    await db.add_custom_days(dates)
     created = result["created"]
     skipped = result["skipped"]
 
@@ -2337,6 +2449,7 @@ async def handle_rule_interval(callback: CallbackQuery, state: FSMContext):
     builder = InlineKeyboardBuilder()
     builder.button(text="📋 Посмотреть расписание", callback_data="admin:schedule")
     builder.button(text=f"📅 Создать на {MONTHS_RU[next_month]}", callback_data=next_cb)
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
     builder.adjust(1)
 
     skip_text = f"\nПропущено <b>{skipped}</b> (уже существовали)" if skipped else ""
@@ -2378,11 +2491,14 @@ async def handle_rule_next_month(callback: CallbackQuery, state: FSMContext):
         f"{end_hour:02d}:00",
         interval_min,
     )
+    # Месячный генератор имеет приоритет над стандартным расписанием
+    await db.add_custom_days(dates)
     created = result["created"]
     skipped = result["skipped"]
 
     builder = InlineKeyboardBuilder()
     builder.button(text="📋 Посмотреть расписание", callback_data="admin:schedule")
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
     builder.adjust(1)
 
     skip_text = f"\nПропущено <b>{skipped}</b> (уже существовали)" if skipped else ""
@@ -2419,12 +2535,11 @@ async def _show_schedule_edit_calendar(message, year: int, month: int, edit: boo
         date_prefix="admin_ed_cal_date",
     )
 
-    # Добавляем кнопку мультивыбора под календарём
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(
-            text="🔲 Выбрать несколько дней",
-            callback_data="admin_ed_multiselect",
-        )
+    # Добавляем кнопки управления под календарём
+    kb.inline_keyboard.extend([
+        [InlineKeyboardButton(text="🔲 Выбрать несколько дней", callback_data="admin_ed_multiselect")],
+        [InlineKeyboardButton(text="← К расписанию", callback_data="admin:schedule")],
+        [InlineKeyboardButton(text="◀ Главное меню", callback_data="admin:main")],
     ])
 
     hint = "<i>📅 — есть слоты  |  число — пустой день (нажмите чтобы создать)</i>"
@@ -2500,8 +2615,10 @@ async def _show_day_action_menu(message, date_str: str, state: FSMContext):
     builder.button(text="➕ Продлить вечером", callback_data=f"admin_ed_ext_e:{date_str}")
     builder.button(text="⏱ Изменить интервал", callback_data=f"admin_ed_chg_int:{date_str}")
     builder.button(text="🗑 Удалить весь день", callback_data=f"edit_day_delete:{date_str}")
-    builder.button(text="← Назад к календарю", callback_data=f"admin_ed_cal_nav:{year}:{month}")
-    builder.adjust(1, 2, 1, 1, 1)
+    builder.button(text="← К редактору", callback_data=f"admin_ed_cal_nav:{year}:{month}")
+    builder.button(text="← К расписанию", callback_data="admin:schedule")
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
+    builder.adjust(1, 2, 1, 1, 1, 1, 1)
 
     await message.edit_text(
         text=(
@@ -2539,7 +2656,9 @@ async def handle_admin_ed_cal_date(callback: CallbackQuery, state: FSMContext):
             )
         builder.button(text="⚙️ Настроить вручную", callback_data="ed_day_manual")
         year, month = int(date_str[:4]), int(date_str[5:7])
-        builder.button(text="← Назад", callback_data=f"admin_ed_cal_nav:{year}:{month}")
+        builder.button(text="← К редактору", callback_data=f"admin_ed_cal_nav:{year}:{month}")
+        builder.button(text="← К расписанию", callback_data="admin:schedule")
+        builder.button(text="◀ Главное меню", callback_data="admin:main")
         builder.adjust(1)
 
         await callback.message.edit_text(
@@ -3330,7 +3449,8 @@ async def handle_admin_default_schedule(callback: CallbackQuery, state: FSMConte
     if not rule:
         builder = InlineKeyboardBuilder()
         builder.button(text="✅ Задать стандартное расписание", callback_data="default_sched:setup")
-        builder.button(text="◀ Назад", callback_data="admin:schedule")
+        builder.button(text="← К расписанию", callback_data="admin:schedule")
+        builder.button(text="◀ Главное меню", callback_data="admin:main")
         builder.adjust(1)
         await callback.message.edit_text(
             text=(
@@ -3347,8 +3467,9 @@ async def handle_admin_default_schedule(callback: CallbackQuery, state: FSMConte
         builder = InlineKeyboardBuilder()
         builder.button(text="✏️ Изменить", callback_data="default_sched:setup")
         builder.button(text="🗑 Удалить", callback_data="default_sched:delete_prompt")
-        builder.button(text="◀ Назад", callback_data="admin:schedule")
-        builder.adjust(2, 1)
+        builder.button(text="← К расписанию", callback_data="admin:schedule")
+        builder.button(text="◀ Главное меню", callback_data="admin:main")
+        builder.adjust(2, 1, 1)
         await callback.message.edit_text(
             text=(
                 "⚙️ <b>Стандартное расписание</b>\n\n"
@@ -3503,7 +3624,8 @@ async def handle_default_interval(callback: CallbackQuery, state: FSMContext):
 
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Редактировать расписание", callback_data="admin:schedule_edit")
-    builder.button(text="◀ К расписанию", callback_data="admin:schedule")
+    builder.button(text="← К расписанию", callback_data="admin:schedule")
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
     builder.adjust(1)
 
     await callback.message.edit_text(
@@ -3512,7 +3634,7 @@ async def handle_default_interval(callback: CallbackQuery, state: FSMContext):
             f"📅 Дни: <b>{wd_str}</b>\n"
             f"🕐 Время: <b>{start_hour:02d}:00 – {end_hour:02d}:00</b>\n"
             f"⏱ Интервал: <b>{interval_min} мин</b>\n\n"
-            f"Создано слотов: <b>{result.get('created', 0)}</b>\n"
+            f"Добавлено слотов: <b>{result.get('created', 0)}</b>\n"
             f"Уже существовало: <b>{result.get('skipped', 0)}</b>"
         ),
         reply_markup=builder.as_markup(),
@@ -3527,6 +3649,7 @@ async def handle_default_sched_delete_prompt(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Да, удалить", callback_data="default_sched:delete_confirm")
     builder.button(text="← Отмена", callback_data="admin:default_schedule")
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
     builder.adjust(1)
     await callback.message.edit_text(
         text=(

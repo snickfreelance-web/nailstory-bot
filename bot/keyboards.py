@@ -577,20 +577,13 @@ def get_admin_pagination_keyboard(
 def get_admin_schedule_keyboard() -> InlineKeyboardMarkup:
     """
     Меню управления расписанием (временными слотами).
-
-    Кнопки:
-        ➕ Добавить рабочий день — создать слоты для новой даты
-        📅 Просмотр дня          — посмотреть слоты конкретного дня
-        🗑 Удалить слот          — убрать конкретное время
-        ◀ Главное меню
+    Кнопки отображаются ПОД календарём текущего месяца.
     """
     builder = InlineKeyboardBuilder()
 
     builder.button(text="⚙️ Стандартное расписание", callback_data="admin:default_schedule")
     builder.button(text="📅 Создать расписание на месяц", callback_data="admin:schedule_rule")
     builder.button(text="✏️ Редактировать расписание", callback_data="admin:schedule_edit")
-    builder.button(text="➕ Добавить рабочий день", callback_data="admin_sched:add_day")
-    builder.button(text="📋 Просмотр дня", callback_data="admin_sched:view_day")
     builder.button(text="◀ Главное меню", callback_data="admin:main")
 
     builder.adjust(1)
@@ -802,11 +795,8 @@ def get_slot_edit_keyboard(
         text="💾 Сохранить изменения", callback_data="edit_slot_save"
     ))
     builder.row(
-        InlineKeyboardButton(
-            text="🗑 Удалить весь день", callback_data=f"edit_day_delete:{date_str}"
-        ),
-        InlineKeyboardButton(
-            text="❌ Отмена", callback_data=f"admin_ed_day_action:{date_str}"
-        ),
+        InlineKeyboardButton(text="🗑 Удалить весь день", callback_data=f"edit_day_delete:{date_str}"),
+        InlineKeyboardButton(text="← Отмена", callback_data=f"admin_ed_day_action:{date_str}"),
     )
+    builder.row(InlineKeyboardButton(text="◀ Главное меню", callback_data="admin:main"))
     return builder.as_markup()

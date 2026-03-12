@@ -1009,6 +1009,18 @@ async def add_custom_day(date_str: str) -> None:
         logger.error(f"Ошибка добавления кастомного дня {date_str}: {e}")
 
 
+async def add_custom_days(dates: list) -> None:
+    """Пакетно помечает список дат как кастомные (для месячного генератора)."""
+    if not dates:
+        return
+    try:
+        rows = [{"date": d} for d in dates]
+        for i in range(0, len(rows), 100):
+            supabase.table("custom_days").upsert(rows[i:i + 100]).execute()
+    except Exception as e:
+        logger.error(f"Ошибка пакетного добавления кастомных дней: {e}")
+
+
 async def remove_custom_day(date_str: str) -> None:
     """Снимает пометку кастомного дня."""
     try:
@@ -1038,7 +1050,7 @@ def _get_dates_for_rule(
     return result
 
 
-async def apply_default_schedule_for_months(months_ahead: int = 3) -> Dict:
+async def apply_default_schedule_for_months(months_ahead: int = 24) -> Dict:
     """
     Применяет стандартное расписание на N месяцев вперёд.
     Пропускает кастомные дни и уже существующие слоты.
@@ -1120,36 +1132,9 @@ async def get_day_schedule_info(date_str: str) -> Optional[Dict]:
 
 async def reset_default_schedule_slots() -> Dict:
     """
-    При смене стандартного расписания:
-    1. Удаляет все свободные слоты в будущем, которые не в custom_days
-    2. Пересоздаёт по новому правилу на 24 месяца вперёд
-
+    При задании/смене стандартного расписания добавляет недостающие слоты
+    на 24 месяца вперёд. Уже существующие слоты (ручные или месячные)
+    не удаляются — приоритет вручную созданных дней сохраняется.
     Вызывается ПОСЛЕ save_default_schedule().
     """
-    today = date.today()
-    custom = await get_custom_days()
-
-    # Удаляем некастомные будущие свободные слоты
-    try:
-        # Получаем все будущие свободные слоты
-        response = (
-            supabase.table("time_slots")
-            .select("id,slot_date")
-            .eq("is_available", True)
-            .gte("slot_date", today.isoformat())
-            .execute()
-        )
-        ids_to_delete = [
-            row["id"] for row in (response.data or [])
-            if row["slot_date"] not in custom
-        ]
-        if ids_to_delete:
-            batch_size = 100
-            for i in range(0, len(ids_to_delete), batch_size):
-                batch = ids_to_delete[i:i + batch_size]
-                supabase.table("time_slots").delete().in_("id", batch).execute()
-    except Exception as e:
-        logger.error(f"Ошибка удаления слотов при смене стандарта: {e}")
-
-    # Создаём слоты по новому правилу на 24 месяца вперёд
     return await apply_default_schedule_for_months(24)
