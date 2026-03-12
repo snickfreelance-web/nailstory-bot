@@ -2414,10 +2414,13 @@ async def handle_rule_interval(callback: CallbackQuery, state: FSMContext):
     start_hour = fsm["rule_start_hour"]
     end_hour = fsm["rule_end_hour"]
 
+    # Пропускаем дни, уже созданные вручную (ручной приоритет над месячным)
+    custom = await db.get_custom_days()
     dates = [
         date(year, month, d).strftime("%Y-%m-%d")
         for d in range(today.day, last_day + 1)
         if date(year, month, d).weekday() in weekdays
+        and date(year, month, d).strftime("%Y-%m-%d") not in custom
     ]
 
     if not dates:
@@ -2479,10 +2482,13 @@ async def handle_rule_next_month(callback: CallbackQuery, state: FSMContext):
     weekdays = {i for i in range(7) if wd_mask & (1 << i)}
     last_day = cal_module.monthrange(next_year, next_month)[1]
 
+    # Пропускаем дни, уже созданные вручную (ручной приоритет над месячным)
+    custom = await db.get_custom_days()
     dates = [
         date(next_year, next_month, d).strftime("%Y-%m-%d")
         for d in range(1, last_day + 1)
         if date(next_year, next_month, d).weekday() in weekdays
+        and date(next_year, next_month, d).strftime("%Y-%m-%d") not in custom
     ]
 
     result = await db.bulk_create_slots(
