@@ -19,6 +19,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from bot.config import settings
 from bot.handlers import common, user, admin
+from bot.migrations import run_migrations
 
 
 # ===================================================
@@ -54,6 +55,9 @@ async def main():
 
     logger.info("🚀 Запуск бота NailStory...")
     logger.info(f"Администраторы: {settings.get_admin_ids()}")
+
+    # Автоматические миграции БД (создание таблиц если нет)
+    await run_migrations()
 
     # ---------------------------------------------------
     # Создаём объект бота

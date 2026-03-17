@@ -9,6 +9,7 @@ class Settings:
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
     ADMIN_IDS: str = os.getenv("ADMIN_IDS", "")
+    SUPABASE_ACCESS_TOKEN: str = os.getenv("SUPABASE_ACCESS_TOKEN", "")
 
     def get_admin_ids(self):
         return [int(x.strip()) for x in self.ADMIN_IDS.split(",") if x.strip()]
