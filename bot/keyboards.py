@@ -546,6 +546,242 @@ def get_admin_slots_list_keyboard(slots: List[Dict]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def get_schedule_mode_choice_keyboard() -> InlineKeyboardMarkup:
+    """
+    Главное меню раздела «Расписание».
+
+    Кнопки:
+        📅 Создать расписание — генератор по правилу (дни+часы+интервал)
+        ✏️ Редактировать расписание — просмотр календаря и правка дней
+        ➕ Добавить день вручную — старый ручной режим (кнопки-слоты)
+        ◀ Главное меню
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📅 Создать расписание на месяц", callback_data="admin_sched:create_rule")
+    builder.button(text="✏️ Редактировать расписание", callback_data="admin_sched:edit_month")
+    builder.button(text="➕ Добавить день вручную", callback_data="admin_sched:add_day")
+    builder.button(text="◀ Главное меню", callback_data="admin:main")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_weekday_keyboard(selected: set) -> InlineKeyboardMarkup:
+    """
+    Мультивыбор дней недели с тогглами.
+
+    Args:
+        selected: Множество выбранных дней (0=Пн, 1=Вт, ..., 6=Вс)
+
+    Кнопки:
+        [✅ Пн] [⬜ Вт] ... — нажать, чтобы переключить
+        [✅ Готово] — подтвердить выбор
+    """
+    builder = InlineKeyboardBuilder()
+    days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    for i, name in enumerate(days):
+        mark = "✅" if i in selected else "⬜"
+        builder.button(text=f"{mark} {name}", callback_data=f"sched_wd:{i}")
+    builder.button(text="✅ Готово →", callback_data="sched_wd:done")
+    builder.adjust(4, 3, 1)
+    return builder.as_markup()
+
+
+def get_hour_keyboard(
+    start_h: int,
+    end_h: int,
+    cb_prefix: str,
+    cancel_cb: str,
+) -> InlineKeyboardMarkup:
+    """
+    Универсальная клавиатура выбора часа.
+
+    Args:
+        start_h: Первый час (включительно)
+        end_h: Последний час (включительно)
+        cb_prefix: Префикс callback_data, итоговый формат: "prefix:HH:00"
+        cancel_cb: callback_data для кнопки «Отмена»
+    """
+    builder = InlineKeyboardBuilder()
+    for h in range(start_h, end_h + 1):
+        builder.button(text=f"{h:02d}:00", callback_data=f"{cb_prefix}:{h:02d}:00")
+    builder.button(text="❌ Отмена", callback_data=cancel_cb)
+    # По 4 часа в ряд, отмена отдельно
+    count = end_h - start_h + 1
+    rows = [4] * (count // 4)
+    if count % 4:
+        rows.append(count % 4)
+    rows.append(1)
+    builder.adjust(*rows)
+    return builder.as_markup()
+
+
+def get_interval_keyboard(cb_prefix: str) -> InlineKeyboardMarkup:
+    """
+    Выбор интервала между слотами: 15/30/60 мин + произвольный.
+    Используется одинаково при создании расписания и при редактировании дня.
+
+    Args:
+        cb_prefix: Префикс callback, итоговый формат: "prefix:15" / "prefix:custom"
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⏱ 15 минут", callback_data=f"{cb_prefix}:15")
+    builder.button(text="⏱ 30 минут", callback_data=f"{cb_prefix}:30")
+    builder.button(text="⏱ 60 минут", callback_data=f"{cb_prefix}:60")
+    builder.button(text="✏️ Свой интервал…", callback_data=f"{cb_prefix}:custom")
+    builder.adjust(3, 1)
+    return builder.as_markup()
+
+
+def build_admin_month_calendar(
+    year: int,
+    month: int,
+    schedule_info: List[Dict],
+) -> InlineKeyboardMarkup:
+    """
+    Месячный календарь для просмотра/редактирования расписания.
+
+    Дни со слотами — кликабельные кнопки.
+    Кастомные дни (is_custom=True) — помечены иконкой ✏️.
+    Дни без слотов — пустые (неактивные).
+    Навигация: ◀ Пред / ▶ След.
+
+    Args:
+        year: Год
+        month: Месяц (1-12)
+        schedule_info: Результат get_month_schedule_info()
+    """
+    import calendar as cal_mod
+    from datetime import date
+
+    builder = InlineKeyboardBuilder()
+
+    # Заголовок месяца
+    months_ru = [
+        "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+        "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+    ]
+    builder.button(
+        text=f"── {months_ru[month]} {year} ──",
+        callback_data="sched_cal_ignore"
+    )
+    builder.adjust(1)
+
+    # Заголовки дней недели
+    for day_name in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]:
+        builder.button(text=day_name, callback_data="sched_cal_ignore")
+
+    # Индекс данных расписания по дате
+    info_by_date = {item["date"]: item for item in schedule_info}
+
+    # Первый день месяца (weekday: 0=пн, 6=вс)
+    first_weekday = cal_mod.monthrange(year, month)[0]
+    days_in_month = cal_mod.monthrange(year, month)[1]
+
+    # Пустые ячейки до первого дня
+    for _ in range(first_weekday):
+        builder.button(text=" ", callback_data="sched_cal_ignore")
+
+    today = date.today()
+
+    for day in range(1, days_in_month + 1):
+        date_str = f"{year}-{month:02d}-{day:02d}"
+        info = info_by_date.get(date_str)
+
+        if info:
+            # День со слотами
+            label = str(day)
+            if info["is_custom"]:
+                label = f"✏️{day}"
+            builder.button(text=label, callback_data=f"edit_day:{date_str}")
+        else:
+            # День без слотов — неактивный
+            builder.button(text=f"· {day}", callback_data="sched_cal_ignore")
+
+    # Добираем пустые ячейки до конца последней строки
+    total_cells = first_weekday + days_in_month
+    remainder = total_cells % 7
+    if remainder:
+        for _ in range(7 - remainder):
+            builder.button(text=" ", callback_data="sched_cal_ignore")
+
+    # Навигация
+    prev_year, prev_month = (year, month - 1) if month > 1 else (year - 1, 12)
+    next_year, next_month = (year, month + 1) if month < 12 else (year + 1, 1)
+
+    today = date.today()
+    if (prev_year, prev_month) >= (today.year, today.month):
+        builder.button(text="◀", callback_data=f"sched_cal_nav:{prev_year}:{prev_month}")
+    else:
+        builder.button(text=" ", callback_data="sched_cal_ignore")
+
+    builder.button(text=" ", callback_data="sched_cal_ignore")
+
+    builder.button(text="▶", callback_data=f"sched_cal_nav:{next_year}:{next_month}")
+
+    builder.button(text="◀ К расписанию", callback_data="admin:schedule")
+
+    # Заголовок + 7 дней нед + все дни + навигация (3) + назад (1)
+    total_day_cells = first_weekday + days_in_month
+    if total_day_cells % 7:
+        total_day_cells += 7 - (total_day_cells % 7)
+
+    # Строим adjust: 1 (заголовок), 7 (дни нед), строки по 7, 3 (навигация), 1 (назад)
+    rows = [1, 7] + [7] * (total_day_cells // 7) + [3, 1]
+    builder.adjust(*rows)
+
+    return builder.as_markup()
+
+
+def get_day_actions_keyboard(date_str: str, has_free_slots: bool = True) -> InlineKeyboardMarkup:
+    """
+    Действия для конкретного дня расписания.
+
+    Кнопки:
+        ✏️ Редактировать — изменить время начала/конца/интервал
+        🗑 Удалить день — удалить все свободные слоты за день
+        ◀ Назад — вернуться к календарю
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✏️ Редактировать", callback_data=f"edit_day_action:edit:{date_str}")
+    if has_free_slots:
+        builder.button(text="🗑 Удалить день", callback_data=f"edit_day_action:delete:{date_str}")
+    builder.button(text="◀ Назад", callback_data="admin_sched:edit_month")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_custom_days_confirm_keyboard(
+    custom_dates: List[str],
+    keep_set: set,
+) -> InlineKeyboardMarkup:
+    """
+    Список кастомных дней с тогглами.
+    ✅ = оставить кастомным (в keep_set)
+    ⬜ = применить общее правило (не в keep_set)
+
+    Args:
+        custom_dates: Список дат ["YYYY-MM-DD", ...]
+        keep_set: Множество дат, которые нужно оставить кастомными
+
+    Кнопки:
+        [✅ 15 мар] / [⬜ 15 мар] — тоглы
+        [✅ Подтвердить]
+    """
+    from bot.utils.validators import format_date_ru
+
+    builder = InlineKeyboardBuilder()
+    for date_str in custom_dates:
+        mark = "✅" if date_str in keep_set else "⬜"
+        label = format_date_ru(date_str)  # "15 марта"
+        builder.button(
+            text=f"{mark} {label}",
+            callback_data=f"sched_custom_toggle:{date_str}"
+        )
+    builder.button(text="✅ Подтвердить", callback_data="sched_custom_confirm")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def get_delete_confirm_keyboard(booking_id: str) -> InlineKeyboardMarkup:
     """
     Клавиатура подтверждения удаления бронирования.

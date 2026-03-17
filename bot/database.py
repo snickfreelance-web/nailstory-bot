@@ -702,3 +702,269 @@ async def get_upcoming_bookings_for_date(target_date: str) -> List[Dict]:
     except Exception as e:
         logger.error(f"Ошибка получения записей за {target_date}: {e}")
         return []
+
+
+# ===================================================
+# ГЕНЕРАТОР РАСПИСАНИЯ (#10)
+# ===================================================
+#
+# SQL для создания таблиц (выполнить в Supabase SQL Editor):
+#
+# CREATE TABLE admin_settings (
+#   key text PRIMARY KEY,
+#   value jsonb NOT NULL
+# );
+#
+# CREATE TABLE custom_schedule_days (
+#   slot_date date PRIMARY KEY
+# );
+
+
+async def bulk_create_slots(
+    dates: List[str],
+    start_time: str,
+    end_time: str,
+    interval_min: int,
+) -> Dict[str, int]:
+    """
+    Пакетно создаёт слоты для списка дат по заданному правилу.
+
+    Для каждой даты генерирует слоты от start_time до end_time с шагом interval_min.
+    Последний слот: end_time - interval_min (слот 18:30 при end=19:00, interval=30).
+    Дубликаты (слот уже существует) — пропускаются.
+
+    Args:
+        dates: Список дат ["YYYY-MM-DD", ...]
+        start_time: Время начала "HH:MM"
+        end_time: Время окончания "HH:MM" (исключительно)
+        interval_min: Шаг в минутах (15, 30, 60 и т.д.)
+
+    Returns:
+        {"created": N, "skipped": M}
+    """
+    from datetime import datetime, timedelta
+
+    created = 0
+    skipped = 0
+
+    # Парсим start/end в минуты от полуночи
+    sh, sm = map(int, start_time.split(":"))
+    eh, em = map(int, end_time.split(":"))
+    start_mins = sh * 60 + sm
+    end_mins = eh * 60 + em
+
+    # Генерируем все времена слотов для одного дня
+    slot_times = []
+    t = start_mins
+    while t < end_mins:
+        hh = t // 60
+        mm = t % 60
+        slot_times.append(f"{hh:02d}:{mm:02d}")
+        t += interval_min
+
+    if not slot_times:
+        return {"created": 0, "skipped": 0}
+
+    for date_str in dates:
+        for time_str in slot_times:
+            # Проверяем существование слота
+            existing = await get_slot_by_date_time(date_str, time_str)
+            if existing:
+                skipped += 1
+                continue
+
+            result = await add_time_slot(date_str, time_str)
+            if result:
+                created += 1
+            else:
+                skipped += 1
+
+    logger.info(f"bulk_create_slots: создано {created}, пропущено {skipped}")
+    return {"created": created, "skipped": skipped}
+
+
+async def delete_free_slots_for_date(slot_date: str) -> int:
+    """
+    Удаляет все СВОБОДНЫЕ слоты за указанную дату.
+    Занятые слоты (is_available=False) не трогаются.
+
+    Args:
+        slot_date: Дата "YYYY-MM-DD"
+
+    Returns:
+        Количество удалённых слотов
+    """
+    try:
+        # Получаем IDs свободных слотов за этот день
+        response = (
+            supabase.table("time_slots")
+            .select("id")
+            .eq("slot_date", slot_date)
+            .eq("is_available", True)
+            .execute()
+        )
+        slots = response.data or []
+        if not slots:
+            return 0
+
+        ids = [s["id"] for s in slots]
+        supabase.table("time_slots").delete().in_("id", ids).execute()
+        logger.info(f"delete_free_slots_for_date({slot_date}): удалено {len(ids)} слотов")
+        return len(ids)
+
+    except Exception as e:
+        logger.error(f"Ошибка удаления слотов за {slot_date}: {e}")
+        return 0
+
+
+async def get_month_schedule_info(year: int, month: int) -> List[Dict]:
+    """
+    Возвращает список дней месяца, у которых есть слоты,
+    с информацией о количестве слотов и признаком кастомного дня.
+
+    Args:
+        year: Год
+        month: Месяц (1-12)
+
+    Returns:
+        Список словарей: {"date": "YYYY-MM-DD", "slot_count": N, "is_custom": bool}
+    """
+    import calendar as cal_mod
+
+    try:
+        # Диапазон дат месяца
+        first_day = f"{year}-{month:02d}-01"
+        last_day_num = cal_mod.monthrange(year, month)[1]
+        last_day = f"{year}-{month:02d}-{last_day_num:02d}"
+
+        # Все слоты за месяц
+        response = (
+            supabase.table("time_slots")
+            .select("slot_date")
+            .gte("slot_date", first_day)
+            .lte("slot_date", last_day)
+            .execute()
+        )
+        slots = response.data or []
+
+        # Считаем количество слотов по датам
+        counts: Dict[str, int] = {}
+        for s in slots:
+            d = s["slot_date"]
+            counts[d] = counts.get(d, 0) + 1
+
+        # Получаем кастомные дни
+        custom_days_list = await get_custom_days()
+        custom_set = set(custom_days_list)
+
+        result = []
+        for date_str, count in sorted(counts.items()):
+            result.append({
+                "date": date_str,
+                "slot_count": count,
+                "is_custom": date_str in custom_set,
+            })
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Ошибка получения инфо о расписании за {year}-{month}: {e}")
+        return []
+
+
+async def save_default_rule(
+    weekdays: List[int],
+    start_time: str,
+    end_time: str,
+    interval_min: int,
+) -> bool:
+    """
+    Сохраняет дефолтное правило расписания в admin_settings.
+    Weekdays: 0=Пн, 1=Вт, ..., 6=Вс.
+
+    Требует таблицы:
+        CREATE TABLE admin_settings (key text PRIMARY KEY, value jsonb NOT NULL);
+    """
+    try:
+        value = {
+            "weekdays": weekdays,
+            "start": start_time,
+            "end": end_time,
+            "interval": interval_min,
+        }
+        supabase.table("admin_settings").upsert({
+            "key": "default_rule",
+            "value": value,
+        }).execute()
+        return True
+
+    except Exception as e:
+        logger.error(f"Ошибка сохранения дефолтного правила: {e}")
+        return False
+
+
+async def get_default_rule() -> Optional[Dict]:
+    """
+    Возвращает дефолтное правило расписания или None, если не задано.
+
+    Returns:
+        {"weekdays": [0,1,2,3,4], "start": "10:00", "end": "19:00", "interval": 30}
+        или None
+    """
+    try:
+        response = (
+            supabase.table("admin_settings")
+            .select("value")
+            .eq("key", "default_rule")
+            .single()
+            .execute()
+        )
+        return response.data["value"] if response.data else None
+
+    except Exception as e:
+        logger.error(f"Ошибка получения дефолтного правила: {e}")
+        return None
+
+
+async def mark_day_custom(slot_date: str) -> bool:
+    """
+    Помечает день как кастомный (отредактированный вручную).
+    Требует: CREATE TABLE custom_schedule_days (slot_date date PRIMARY KEY);
+    """
+    try:
+        supabase.table("custom_schedule_days").upsert(
+            {"slot_date": slot_date}
+        ).execute()
+        return True
+
+    except Exception as e:
+        logger.error(f"Ошибка пометки кастомного дня {slot_date}: {e}")
+        return False
+
+
+async def unmark_day_custom(slot_date: str) -> bool:
+    """Снимает пометку кастомного дня."""
+    try:
+        supabase.table("custom_schedule_days").delete().eq("slot_date", slot_date).execute()
+        return True
+
+    except Exception as e:
+        logger.error(f"Ошибка снятия пометки кастомного дня {slot_date}: {e}")
+        return False
+
+
+async def get_custom_days() -> List[str]:
+    """
+    Возвращает список кастомных дат в формате "YYYY-MM-DD".
+    """
+    try:
+        response = (
+            supabase.table("custom_schedule_days")
+            .select("slot_date")
+            .execute()
+        )
+        return [r["slot_date"] for r in (response.data or [])]
+
+    except Exception as e:
+        logger.error(f"Ошибка получения кастомных дней: {e}")
+        return []
