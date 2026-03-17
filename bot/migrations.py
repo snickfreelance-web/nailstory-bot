@@ -39,6 +39,31 @@ MIGRATIONS = [
             )
         """,
     },
+    # Права доступа: отключаем RLS и выдаём гранты всем нужным ролям.
+    # Supabase использует anon/authenticated/service_role через PostgREST.
+    {
+        "name": "grant_admin_settings",
+        "sql": """
+            ALTER TABLE public.admin_settings DISABLE ROW LEVEL SECURITY;
+            GRANT ALL ON TABLE public.admin_settings TO anon;
+            GRANT ALL ON TABLE public.admin_settings TO authenticated;
+            GRANT ALL ON TABLE public.admin_settings TO service_role
+        """,
+    },
+    {
+        "name": "grant_custom_schedule_days",
+        "sql": """
+            ALTER TABLE public.custom_schedule_days DISABLE ROW LEVEL SECURITY;
+            GRANT ALL ON TABLE public.custom_schedule_days TO anon;
+            GRANT ALL ON TABLE public.custom_schedule_days TO authenticated;
+            GRANT ALL ON TABLE public.custom_schedule_days TO service_role
+        """,
+    },
+    # Перезагружаем кеш схемы PostgREST чтобы новые таблицы стали доступны через REST API
+    {
+        "name": "reload_postgrest_schema",
+        "sql": "SELECT pg_notify('pgrst', 'reload schema')",
+    },
 ]
 
 
