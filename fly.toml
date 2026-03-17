@@ -1,0 +1,12 @@
+# fly.toml — конфигурация Fly.io для NailStory Bot
+# Бот работает в режиме polling (воркер без HTTP-сервера)
+
+app = "nailstory-bot"
+primary_region = "fra"
+
+[build]
+
+[vm]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256

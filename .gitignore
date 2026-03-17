@@ -21,8 +21,5 @@ env/
 # Логи
 *.log
 
-# Docker
-.dockerignore
-
 # Claude internal files
 .claude/

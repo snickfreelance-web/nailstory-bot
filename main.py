@@ -19,6 +19,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from bot.config import settings
 from bot.handlers import common, user, admin
+from bot.migrations import run_migrations
 import bot.database as db
 
 
@@ -62,6 +63,13 @@ async def main():
     # ВАЖНО: вызывать до start_polling, чтобы клиент был готов
     # к моменту первого запроса к БД.
     db.init_supabase()
+
+    # ---------------------------------------------------
+    # Автоматические миграции БД
+    # ---------------------------------------------------
+    # Создаём нужные таблицы если их ещё нет (идемпотентно).
+    # Требует SUPABASE_ACCESS_TOKEN в .env.
+    await run_migrations()
 
     # ---------------------------------------------------
     # Создаём объект бота
